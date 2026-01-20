@@ -1,16 +1,13 @@
 /**
  * UNIFIED GOOGLE ADS TRANSPARENCY AGENT
  * =====================================
- * Combines app_data_agent.js + agent.js in ONE VISIT per URL
+ * Extracts ONLY: App Name, App Link (from meta tag), App Headline/Subtitle
  * 
  * Sheet Structure:
- *   Column A: Advertiser Name
  *   Column B: Ads URL
- *   Column C: App Link
+ *   Column C: App Link (from meta[data-asoch-meta])
  *   Column D: App Name
- *   Column F: App Subtitle/Tagline (cS4Vcb-vnv8ic)
- *   Column G: Image URL
- *   Column M: Timestamp
+ *   Column F: App Headline/Subtitle (cS4Vcb-vnv8ic)
  */
 
 // EXACT IMPORTS FROM app_data_agent.js
@@ -121,7 +118,6 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 const storeLink = row[2]?.trim() || '';
                 const appName = row[3]?.trim() || '';
                 const appSubtitle = row[5]?.trim() || '';
-                const imageUrl = row[6]?.trim() || '';
 
                 if (!url) continue;
 
@@ -131,8 +127,8 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                     continue; // Skip - already has Play Store link
                 }
 
-                // Process all rows that need metadata extraction
-                const needsMetadata = !storeLink || storeLink === 'NOT_FOUND' || !appName || !appSubtitle || !imageUrl;
+                // Process rows that need extraction (app name, app link, or app headline)
+                const needsMetadata = !storeLink || storeLink === 'NOT_FOUND' || !appName || !appSubtitle;
                 toProcess.push({
                     url,
                     rowIndex: actualRowIndex,
@@ -162,14 +158,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
         }
     }
 
-    const textAdsCount = toProcess.filter(x => x.isTextAd).length;
-    console.log(`📊 Total: ${totalProcessed} rows scanned, ${textAdsCount} text ads need store link extraction\n`);
-    // Sort to prioritize text ads (process them first)
-    toProcess.sort((a, b) => {
-        if (a.isTextAd && !b.isTextAd) return -1;
-        if (!a.isTextAd && b.isTextAd) return 1;
-        return 0;
-    });
+    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} rows need extraction\n`);
     return toProcess;
 }
 
@@ -177,31 +166,21 @@ async function batchWriteToSheet(sheets, updates) {
     if (updates.length === 0) return;
 
     const data = [];
-    // Write each field independently - if one field fails to extract, others still get written
-    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, appSubtitle, imageUrl }) => {
+    // Write ONLY: App Link (C), App Name (D), App Headline (F)
+    updates.forEach(({ rowIndex, storeLink, appName, appSubtitle }) => {
         const rowNum = rowIndex + 1;
-        // Write advertiser name (Column A) - only if not SKIP
-        if (advertiserName && advertiserName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
-        }
-        // Write store link (Column C) - ALWAYS write (NOT_FOUND if missing, but always write to sheet)
+        
+        // Write store link (Column C) - ALWAYS write
         const storeLinkValue = storeLink && storeLink !== 'SKIP' ? storeLink : 'NOT_FOUND';
         data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
-        // Write app name (Column D) - only if not SKIP
-        if (appName && appName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
-        }
-        // Write app subtitle/tagline (Column F) - always write (NOT_FOUND if missing)
+        
+        // Write app name (Column D) - ALWAYS write
+        const appNameValue = appName && appName !== 'SKIP' ? appName : 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appNameValue]] });
+        
+        // Write app headline/subtitle (Column F) - ALWAYS write
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
         data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
-
-        // Write Image URL (Column G) - always write (NOT_FOUND if missing)
-        const imageUrlValue = imageUrl || 'NOT_FOUND';
-        data.push({ range: `${SHEET_NAME}!G${rowNum}`, values: [[imageUrlValue]] });
-
-        // Write Timestamp (Column M) - always write
-        const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
-        data.push({ range: `${SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
     });
 
     if (data.length === 0) return;
@@ -224,11 +203,9 @@ async function batchWriteToSheet(sheets, updates) {
 async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLink, attempt = 1) {
     const page = await browser.newPage();
     let result = {
-        advertiserName: 'SKIP',
         appName: needsMetadata ? 'NOT_FOUND' : 'SKIP',
         storeLink: needsMetadata ? 'NOT_FOUND' : 'SKIP',
-        appSubtitle: needsMetadata ? 'NOT_FOUND' : 'SKIP',
-        imageUrl: needsMetadata ? 'NOT_FOUND' : 'SKIP'
+        appSubtitle: needsMetadata ? 'NOT_FOUND' : 'SKIP'
     };
 
     // Clean name function - removes CSS garbage and normalizes
@@ -409,7 +386,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
             content.toLowerCase().includes('verify you are human')) {
             console.error('  ⚠️ BLOCKED');
             await page.close();
-            return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', appSubtitle: 'BLOCKED', imageUrl: 'BLOCKED' };
+            return { appName: 'BLOCKED', storeLink: 'BLOCKED', appSubtitle: 'BLOCKED' };
         }
 
         // Wait for dynamic elements to settle (optimized for speed)
@@ -490,88 +467,25 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
         }
 
         // =====================================================
-        // PHASE 1: METADATA EXTRACTION
+        // EXTRACT: App Name, App Link (from meta tag), App Headline
         // =====================================================
-        let mainPageInfo = null;
         if (needsMetadata) {
-            console.log(`  📊 Extracting metadata...`);
+            console.log(`  📊 Extracting: App Name, App Link, App Headline...`);
 
-            mainPageInfo = await page.evaluate(() => {
-                const getSafeText = (sel) => {
-                    const el = document.querySelector(sel);
-                    if (!el) return null;
-                    const text = el.innerText.trim();
-                    const blacklistWords = ['ad details', 'google ads', 'transparency center', 'about this ad'];
-                    if (!text || blacklistWords.some(word => text.toLowerCase().includes(word)) || text.length < 2) return null;
-                    return text;
-                };
-
-                const advertiserSelectors = [
-                    '.advertiser-name',
-                    '.advertiser-name-container',
-                    'h1',
-                    '.creative-details-page-header-text',
-                    '.ad-details-heading'
-                ];
-
-                let advertiserName = null;
-                for (const sel of advertiserSelectors) {
-                    advertiserName = getSafeText(sel);
-                    if (advertiserName) break;
-                }
-
-                const checkVideo = () => {
-                    const videoEl = document.querySelector('video');
-                    if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
-                    return document.body.innerText.includes('Format: Video');
-                };
-
-                return {
-                    advertiserName: advertiserName || 'NOT_FOUND',
-                    blacklist: advertiserName ? advertiserName.toLowerCase() : '',
-                    isVideo: checkVideo()
-                };
-            });
-
-            const blacklistName = mainPageInfo.blacklist;
-            result.advertiserName = mainPageInfo.advertiserName;
+            // Get blacklist words for filtering app names
+            const blacklistName = 'ad details';
 
             const frames = page.frames();
             for (const frame of frames) {
                 try {
                     const frameData = await frame.evaluate((blacklist) => {
-                        const data = { appName: null, storeLink: null, isVideo: false, appSubtitle: null, imageUrl: null, metaStoreLinkFound: null, metaTagCount: 0 };
+                        const data = { appName: null, storeLink: null, appSubtitle: null, metaStoreLinkFound: null, metaTagCount: 0 };
                         const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
                         // Check if this frame content is visible (has dimensions)
                         const bodyRect = document.body.getBoundingClientRect();
                         if (bodyRect.width < 50 || bodyRect.height < 50) {
                             return { ...data, isHidden: true };
-                        }
-
-                        // =====================================================
-                        // EXTRACT APP SUBTITLE/TAGLINE - Only cS4Vcb-vnv8ic class
-                        // =====================================================
-                        // Note: Subtitle extraction will be done after hovering (see below)
-
-                        // =====================================================
-                        // EXTRACT IMAGE URL (especially for Image Ads)
-                        // =====================================================
-                        const imageSelectors = [
-                            '.html-container img',
-                            '.creative-container img',
-                            'img[src*="googlesyndication.com"]',
-                            'img[src*="archive/simad"]',
-                            'img[src*="simad"]'
-                        ];
-                        for (const sel of imageSelectors) {
-                            try {
-                                const img = root.querySelector(sel);
-                                if (img && img.src && img.src.startsWith('http')) {
-                                    data.imageUrl = img.src;
-                                    break;
-                                }
-                            } catch (e) { }
                         }
 
                         // =====================================================
@@ -732,10 +646,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                     // Subtitle extraction will be done separately with hover
 
                     // Extract Image URL if found
-                    if (frameData.imageUrl && result.imageUrl === 'NOT_FOUND') {
-                        result.imageUrl = frameData.imageUrl;
-                        console.log(`  🖼️ Found Image URL: ${result.imageUrl.substring(0, 50)}...`);
-                    }
 
                     // Log meta tag extraction results
                     if (frameData.metaTagCount) {
@@ -1181,11 +1091,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
         }
         // Return partial results - only set ERROR for fields that weren't extracted
         return {
-            advertiserName: result.advertiserName || 'ERROR',
             appName: result.appName || 'ERROR',
             storeLink: result.storeLink || 'ERROR',
-            appSubtitle: result.appSubtitle || 'ERROR',
-            imageUrl: result.imageUrl || 'ERROR'
+            appSubtitle: result.appSubtitle || 'ERROR'
         };
     }
 }
@@ -1222,16 +1130,16 @@ async function extractWithRetry(item, browser) {
         await randomDelay(1000, 2000); // Reduced retry delay for speed
     }
     // If we're here, we exhausted retries. Return whatever we have.
-    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
+    return { storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', appSubtitle: 'NOT_FOUND' };
 }
 
 // ============================================
 // MAIN EXECUTION
 // ============================================
 (async () => {
-    console.log(`🤖 Starting UNIFIED Google Ads Agent...\n`);
+    console.log(`🤖 Starting Google Ads Agent...\n`);
     console.log(`📋 Sheet: ${SHEET_NAME}`);
-    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, F=Subtitle (cS4Vcb-vnv8ic), G=Image URL\n`);
+    console.log(`⚡ Extracting: C=App Link (meta tag), D=App Name, F=App Headline (cS4Vcb-vnv8ic)\n`);
 
     const sessionStartTime = Date.now();
     const MAX_RUNTIME = 330 * 60 * 1000;
@@ -1322,16 +1230,14 @@ async function extractWithRetry(item, browser) {
                     const data = await extractWithRetry(item, browser);
                     return {
                         rowIndex: item.rowIndex,
-                        advertiserName: data.advertiserName,
                         storeLink: data.storeLink,
                         appName: data.appName,
-                        appSubtitle: data.appSubtitle,
-                        imageUrl: data.imageUrl
+                        appSubtitle: data.appSubtitle
                     };
                 }));
 
                 results.forEach(r => {
-                    console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Subtitle=${r.appSubtitle?.substring(0, 30) || 'NOT_FOUND'}...`);
+                    console.log(`  → Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 40) || 'NOT_FOUND'}... | Name=${r.appName || 'NOT_FOUND'} | Headline=${r.appSubtitle?.substring(0, 30) || 'NOT_FOUND'}...`);
                 });
 
                 // Separate successful results from blocked ones
