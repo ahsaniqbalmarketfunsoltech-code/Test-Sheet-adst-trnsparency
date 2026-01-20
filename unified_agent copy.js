@@ -178,29 +178,35 @@ async function batchWriteToSheet(sheets, updates) {
     const data = [];
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId, appSubtitle, imageUrl }) => {
         const rowNum = rowIndex + 1;
-        if (advertiserName && advertiserName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
-        }
-        if (storeLink && storeLink !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
-        }
-        if (appName && appName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
-        }
-        if (videoId && videoId !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
-        }
-        // Write app subtitle/tagline to Column F
-        const appSubtitleValue = appSubtitle || 'NOT_FOUND';
-        data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
 
-        // Write Image URL to Column G
-        const imageUrlValue = imageUrl || 'NOT_FOUND';
-        data.push({ range: `${SHEET_NAME}!G${rowNum}`, values: [[imageUrlValue]] });
+        // Only write advertiser name if it's found and not a generic skip/error
+        if (advertiserName && !['SKIP', 'NOT_FOUND', 'BLOCKED', 'ERROR'].includes(advertiserName)) {
+            data.push({ range: `'${SHEET_NAME}'!A${rowNum}`, values: [[advertiserName]] });
+        }
 
-        // Write Timestamp to Column M (Pakistan Time)
+        if (storeLink && storeLink !== 'SKIP' && storeLink !== 'ERROR') {
+            data.push({ range: `'${SHEET_NAME}'!C${rowNum}`, values: [[storeLink]] });
+        }
+
+        if (appName && appName !== 'SKIP' && appName !== 'ERROR') {
+            data.push({ range: `'${SHEET_NAME}'!D${rowNum}`, values: [[appName]] });
+        }
+
+        if (videoId && videoId !== 'SKIP' && videoId !== 'ERROR') {
+            data.push({ range: `'${SHEET_NAME}'!E${rowNum}`, values: [[videoId]] });
+        }
+
+        // Subtitle and Image
+        if (appSubtitle && appSubtitle !== 'SKIP') {
+            data.push({ range: `'${SHEET_NAME}'!F${rowNum}`, values: [[appSubtitle]] });
+        }
+        if (imageUrl && imageUrl !== 'SKIP') {
+            data.push({ range: `'${SHEET_NAME}'!G${rowNum}`, values: [[imageUrl]] });
+        }
+
+        // Timestamp
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
-        data.push({ range: `${SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
+        data.push({ range: `'${SHEET_NAME}'!M${rowNum}`, values: [[timestamp]] });
     });
 
     if (data.length === 0) return;
@@ -1231,13 +1237,17 @@ async function extractWithRetry(item, browser) {
             try {
                 // Stagger page loads to avoid blocks - add delay between each concurrent page
                 const results = await Promise.all(batch.map(async (item, index) => {
-                    // Add random delay before starting each page (staggered)
+                    // Staggered starts
                     if (index > 0) {
                         const staggerDelay = PAGE_LOAD_DELAY_MIN + Math.random() * (PAGE_LOAD_DELAY_MAX - PAGE_LOAD_DELAY_MIN);
-                        await sleep(staggerDelay * index); // Each page waits progressively longer
+                        await sleep(staggerDelay * index);
                     }
+
+                    console.log(`  🚀 Row ${item.rowIndex + 1}: Starting ${item.url.substring(0, 40)}...`);
                     const data = await extractWithRetry(item, browser);
+
                     return {
+                        url: item.url,
                         rowIndex: item.rowIndex,
                         advertiserName: data.advertiserName,
                         storeLink: data.storeLink,
@@ -1249,7 +1259,8 @@ async function extractWithRetry(item, browser) {
                 }));
 
                 results.forEach(r => {
-                    console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
+                    const linkStatus = r.storeLink && r.storeLink !== 'NOT_FOUND' && r.storeLink !== 'BLOCKED' ? '✅' : '❌';
+                    console.log(`  ${linkStatus} Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 45) || 'NONE'} | Name=${r.appName}`);
                 });
 
                 // Separate successful results from blocked ones
