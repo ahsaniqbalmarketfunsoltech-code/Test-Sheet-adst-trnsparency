@@ -977,17 +977,88 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             // FALLBACK FOR SUBTITLE (Main Page) - If not found in iframes
             if (result.appSubtitle === 'NOT_FOUND') {
                 const mainSubtitle = await page.evaluate(() => {
-                    const selectors = ['.c54Vcb-vmv8lc', '[class*="vmv8lc"]', '[class*="tagline"]', '[class*="subtitle"]'];
+                    const selectors = [
+                        '.c54Vcb-vmv8lc',           // Text ad headline
+                        'div.c54Vcb-vmv8lc',        // Explicit div selector
+                        '[class*="vmv8lc"]',        // Partial class match
+                        '[class*="tagline"]',
+                        '[class*="subtitle"]',
+                        '.headline'
+                    ];
                     for (const sel of selectors) {
                         const el = document.querySelector(sel);
                         if (el) {
                             const text = (el.innerText || el.textContent || '').trim();
-                            if (text && text.length >= 3 && text.length <= 150) return text;
+                            // Validate text: not too short, not too long, not CSS garbage
+                            if (text && text.length >= 3 && text.length <= 150) {
+                                if (!/^[\d\s\W]+$/.test(text) && !text.includes('{') && !text.includes(':')) {
+                                    return text;
+                                }
+                            }
                         }
                     }
                     return null;
                 });
-                if (mainSubtitle) result.appSubtitle = mainSubtitle;
+                if (mainSubtitle) {
+                    result.appSubtitle = mainSubtitle;
+                    console.log(`  ✓ Found headline (main page): ${mainSubtitle.substring(0, 50)}...`);
+                }
+            }
+
+            // =====================================================
+            // FALLBACK FOR STORE LINK (Main Page - for text ads)
+            // Search main page for meta data-asoch-meta with package info
+            // =====================================================
+            if (result.storeLink === 'NOT_FOUND') {
+                const mainStoreLink = await page.evaluate(() => {
+                    // Look for meta tag with data-asoch-meta
+                    const metaElements = document.querySelectorAll('meta[data-asoch-meta], div[data-asoch-meta], *[data-asoch-meta]');
+                    for (const meta of metaElements) {
+                        const metaValue = meta.getAttribute('data-asoch-meta') || '';
+
+                        // Look for Play Store URL in the meta value
+                        if (metaValue.includes('play.google.com')) {
+                            const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
+                            if (match && match[1]) {
+                                return `https://play.google.com/store/apps/details?id=${match[1]}`;
+                            }
+                        }
+
+                        // Look for encoded adurl
+                        if (metaValue.includes('adurl=')) {
+                            const adurlMatch = metaValue.match(/adurl=([^"'\s\]]+)/);
+                            if (adurlMatch && adurlMatch[1]) {
+                                try {
+                                    const decodedUrl = decodeURIComponent(adurlMatch[1]);
+                                    const pkgMatch = decodedUrl.match(/id=([a-zA-Z0-9._]+)/);
+                                    if (pkgMatch && pkgMatch[1]) {
+                                        return `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
+                                    }
+                                } catch (e) { }
+                            }
+                        }
+
+                        // Direct package name pattern
+                        const pkgMatches = metaValue.match(/["']([a-z][a-z0-9_]*(\.[a-z0-9_]+){2,})["']/gi);
+                        if (pkgMatches) {
+                            for (const pkg of pkgMatches) {
+                                const cleanPkg = pkg.replace(/["']/g, '');
+                                if (!cleanPkg.includes('google') &&
+                                    !cleanPkg.includes('example') &&
+                                    !cleanPkg.includes('android.') &&
+                                    !cleanPkg.startsWith('com.google') &&
+                                    cleanPkg.split('.').length >= 3) {
+                                    return `https://play.google.com/store/apps/details?id=${cleanPkg}`;
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                });
+                if (mainStoreLink) {
+                    result.storeLink = mainStoreLink;
+                    console.log(`  ✓ Found store link (main page): ${mainStoreLink.substring(0, 60)}...`);
+                }
             }
         }
 
