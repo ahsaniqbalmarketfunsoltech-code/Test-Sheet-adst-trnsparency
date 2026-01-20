@@ -973,15 +973,26 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             // =====================================================
             // FALLBACK FOR STORE LINK (Main Page - for text ads)
             // Search main page for meta data-asoch-meta with package info
+            // FIXED: Prioritize meta tags in ad content area, not other ads
             // =====================================================
             if (result.storeLink === 'NOT_FOUND') {
                 const mainStoreLink = await page.evaluate(() => {
-                    // Look for meta tag with data-asoch-meta
-                    const metaElements = document.querySelectorAll('meta[data-asoch-meta], div[data-asoch-meta], *[data-asoch-meta]');
-                    for (const meta of metaElements) {
+                    // First, try to find meta tag within the ad preview/content area (most reliable)
+                    const adContentArea = document.querySelector('#portrait-landscape-phone, .creative-container, .ad-preview, [class*="creative"]');
+                    const searchRoot = adContentArea || document;
+                    
+                    // Look for meta tag with data-asoch-meta (prioritize those in ad content area)
+                    const metaElements = searchRoot.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]');
+                    
+                    // If found in ad content area, use those first
+                    const adContentMetas = adContentArea ? Array.from(adContentArea.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]')) : [];
+                    const allMetas = Array.from(metaElements);
+                    const prioritizedMetas = [...adContentMetas, ...allMetas.filter(m => !adContentMetas.includes(m))];
+                    
+                    for (const meta of prioritizedMetas) {
                         const metaValue = meta.getAttribute('data-asoch-meta') || '';
 
-                        // Look for Play Store URL in the meta value
+                        // Method 1: Look for full play.google.com URL with id= parameter (highest priority)
                         if (metaValue.includes('play.google.com')) {
                             const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
                             if (match && match[1]) {
@@ -989,7 +1000,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
-                        // Look for encoded adurl
+                        // Method 2: Look for encoded adurl with Play Store URL
                         if (metaValue.includes('adurl=')) {
                             const adurlMatch = metaValue.match(/adurl=([^"'\s\]]+)/);
                             if (adurlMatch && adurlMatch[1]) {
@@ -1002,22 +1013,22 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 } catch (e) { }
                             }
                         }
-
-                        // Direct package name pattern
-                        const pkgMatches = metaValue.match(/["']([a-z][a-z0-9_]*(\.[a-z0-9_]+){2,})["']/gi);
-                        if (pkgMatches) {
-                            for (const pkg of pkgMatches) {
-                                const cleanPkg = pkg.replace(/["']/g, '');
-                                if (!cleanPkg.includes('google') &&
-                                    !cleanPkg.includes('example') &&
-                                    !cleanPkg.includes('android.') &&
-                                    !cleanPkg.startsWith('com.google') &&
-                                    cleanPkg.split('.').length >= 3) {
-                                    return `https://play.google.com/store/apps/details?id=${cleanPkg}`;
+                    }
+                    
+                    // Fallback: Search all links in ad content area for store URLs
+                    if (adContentArea) {
+                        const adLinks = adContentArea.querySelectorAll('a[href]');
+                        for (const link of adLinks) {
+                            const href = link.getAttribute('href') || link.href || '';
+                            if (href.includes('play.google.com/store/apps') && href.includes('id=')) {
+                                const match = href.match(/id=([a-zA-Z0-9._]+)/);
+                                if (match && match[1]) {
+                                    return `https://play.google.com/store/apps/details?id=${match[1]}`;
                                 }
                             }
                         }
                     }
+                    
                     return null;
                 });
                 if (mainStoreLink) {
@@ -1064,13 +1075,38 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     console.log(`  📱 Has data-asoch-meta: ${hasAsochMeta}`);
 
                     // Method 1: Look for play.google.com/store/apps/details?id= pattern
+                    // FIXED: Find the link closest to the ad content, not just the first match
                     const playStoreMatches = allContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-zA-Z0-9._]+)/g);
                     console.log(`  📱 Play Store direct matches: ${playStoreMatches ? playStoreMatches.length : 0}`);
                     if (playStoreMatches && playStoreMatches.length > 0) {
-                        const idMatch = playStoreMatches[0].match(/id=([a-zA-Z0-9._]+)/);
-                        if (idMatch && idMatch[1]) {
-                            result.storeLink = `https://play.google.com/store/apps/details?id=${idMatch[1]}`;
-                            console.log(`  ✓ Found store link (HTML content): ${result.storeLink.substring(0, 60)}...`);
+                        // For text ads, prefer links found in data-asoch-meta or near ad content
+                        // Try to find link in context of the current ad (not other ads on page)
+                        let selectedLink = null;
+                        
+                        // First, try to find link within data-asoch-meta context (most reliable for current ad)
+                        const metaContextMatches = allContent.match(/data-asoch-meta="[^"]*?play\.google\.com\/store\/apps\/details\?id=([a-zA-Z0-9._]+)/g);
+                        if (metaContextMatches && metaContextMatches.length > 0) {
+                            const idMatch = metaContextMatches[0].match(/id=([a-zA-Z0-9._]+)/);
+                            if (idMatch && idMatch[1]) {
+                                selectedLink = `https://play.google.com/store/apps/details?id=${idMatch[1]}`;
+                                console.log(`  ✓ Found store link (in data-asoch-meta context): ${selectedLink.substring(0, 60)}...`);
+                            }
+                        }
+                        
+                        // If not found in meta context, use first match (but log warning if multiple)
+                        if (!selectedLink) {
+                            if (playStoreMatches.length > 1) {
+                                console.log(`  ⚠️ Warning: Found ${playStoreMatches.length} Play Store links, using first match`);
+                            }
+                            const idMatch = playStoreMatches[0].match(/id=([a-zA-Z0-9._]+)/);
+                            if (idMatch && idMatch[1]) {
+                                selectedLink = `https://play.google.com/store/apps/details?id=${idMatch[1]}`;
+                                console.log(`  ✓ Found store link (HTML content): ${selectedLink.substring(0, 60)}...`);
+                            }
+                        }
+                        
+                        if (selectedLink) {
+                            result.storeLink = selectedLink;
                         }
                     }
 
