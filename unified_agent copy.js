@@ -960,6 +960,49 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     console.log(`  ✓ Found store link (main page): ${mainStoreLink.substring(0, 60)}...`);
                 }
             }
+
+            // =====================================================
+            // RAW HTML CONTENT FALLBACK (for cross-origin iframes)
+            // Search the full page HTML for package names
+            // =====================================================
+            if (result.storeLink === 'NOT_FOUND') {
+                try {
+                    const fullContent = await page.content();
+
+                    // Method 1: Look for play.google.com/store/apps/details?id= pattern
+                    const playStoreMatches = fullContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-zA-Z0-9._]+)/g);
+                    if (playStoreMatches && playStoreMatches.length > 0) {
+                        const idMatch = playStoreMatches[0].match(/id=([a-zA-Z0-9._]+)/);
+                        if (idMatch && idMatch[1]) {
+                            result.storeLink = `https://play.google.com/store/apps/details?id=${idMatch[1]}`;
+                            console.log(`  ✓ Found store link (HTML content): ${result.storeLink.substring(0, 60)}...`);
+                        }
+                    }
+
+                    // Method 2: Look for encoded adurl with package
+                    if (result.storeLink === 'NOT_FOUND') {
+                        const adurlMatches = fullContent.match(/adurl=https?%3A%2F%2Fplay\.google\.com%2Fstore%2Fapps%2Fdetails%3Fid%3D([a-zA-Z0-9._]+)/g);
+                        if (adurlMatches && adurlMatches.length > 0) {
+                            const idMatch = adurlMatches[0].match(/id%3D([a-zA-Z0-9._]+)/);
+                            if (idMatch && idMatch[1]) {
+                                result.storeLink = `https://play.google.com/store/apps/details?id=${idMatch[1]}`;
+                                console.log(`  ✓ Found store link (encoded adurl): ${result.storeLink.substring(0, 60)}...`);
+                            }
+                        }
+                    }
+
+                    // Method 3: Look for package name patterns in data-asoch-meta
+                    if (result.storeLink === 'NOT_FOUND') {
+                        const metaMatch = fullContent.match(/data-asoch-meta="[^"]*id=([a-zA-Z0-9._]+)[^"]*"/);
+                        if (metaMatch && metaMatch[1] && !metaMatch[1].includes('google')) {
+                            result.storeLink = `https://play.google.com/store/apps/details?id=${metaMatch[1]}`;
+                            console.log(`  ✓ Found store link (meta content): ${result.storeLink.substring(0, 60)}...`);
+                        }
+                    }
+                } catch (e) {
+                    console.log(`  ⚠️ HTML content search failed: ${e.message}`);
+                }
+            }
         }
 
         // =====================================================
