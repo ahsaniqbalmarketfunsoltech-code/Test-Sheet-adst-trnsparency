@@ -9,18 +9,6 @@ on:
         required: false
         default: 'Test'
         type: string
-  
-  # Trigger from Google Sheets (via repository_dispatch)
-  repository_dispatch:
-    types: [sheet_update]
-  
-  # Schedule: Run 4 times a day (every 6 hours)
-  schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours: 12:00 AM, 6:00 AM, 12:00 PM, 6:00 PM UTC
-
-concurrency:
-  group: unified-agent-copy-bottom-continuous
-  cancel-in-progress: false  # Don't cancel if already running
 
 jobs:
   scrape:
@@ -30,49 +18,24 @@ jobs:
       contents: read
     
     steps:
-      - name: Check if workflow already running (backup schedule check)
-        if: github.event_name == 'schedule'
-        id: check_running
-        run: |
-          echo "🔍 Checking if workflow is already running..."
-          RUNNING=$(curl -s \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-agent-copy-bottom.yml/runs?status=in_progress" | grep -o '"total_count":[0-9]*' | cut -d':' -f2)
-          
-          if [ "$RUNNING" != "0" ] && [ ! -z "$RUNNING" ]; then
-            echo "✅ Workflow is already running ($RUNNING active runs). Skipping scheduled run."
-            echo "skip=true" >> $GITHUB_OUTPUT
-          else
-            echo "🔄 No active runs found. Proceeding with scheduled backup run."
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
       - name: Checkout repository
-        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         uses: actions/checkout@v4
       
       - name: Setup Node.js
-        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
       
       - name: Install system dependencies for Puppeteer
-        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgbm1 libasound2t64 libnss3 libxss1 libatk-bridge2.0-0 libgtk-3-0 libxshmfence1
       
       - name: Install dependencies
-        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         run: npm ci
       
       - name: Create credentials file
-        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         run: |
           cat > credentials.json << EOF
           ${{ secrets.GOOGLE_CREDENTIALS }}
@@ -80,7 +43,6 @@ jobs:
         shell: bash
       
       - name: Run Unified Agent Copy Bottom (Test data - Bottom to Top)
-        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         env:
           SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Test data' }}
           SHEET_BATCH_SIZE: ${{ secrets.SHEET_BATCH_SIZE || '10000' }}
@@ -97,11 +59,11 @@ jobs:
         run: node unified_agent_copy_bottom.js
       
       - name: Cleanup credentials
-        if: always() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
+        if: always()
         run: rm -f credentials.json
       
       - name: Upload logs on failure
-        if: failure() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: error-logs-copy-bottom
