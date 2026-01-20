@@ -27,7 +27,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Test'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
-const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
+const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 2000; // Rows to load per batch
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
@@ -99,10 +99,11 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
 
     console.log(`📊 Loading data in batches of ${batchSize} rows...`);
 
+    let skippedCount = 0;
     while (hasMoreData) {
         try {
             const endRow = startRow + batchSize - 1;
-            const range = `${SHEET_NAME}!A${startRow + 1}:G${endRow + 1}`; // +1 because Google Sheets is 1-indexed
+            const range = `'${SHEET_NAME}'!A${startRow + 1}:G${endRow + 1}`; // +1 because Google Sheets is 1-indexed
 
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
@@ -119,8 +120,8 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
                 const actualRowIndex = startRow + i; // Actual row number in sheet
-                const url = row[1]?.trim() || '';
-                const storeLink = row[2]?.trim() || '';
+                const url = (row[1] || '').trim();
+                const storeLink = (row[2] || '').trim();
                 const appName = row[3]?.trim() || '';
                 const videoId = row[4]?.trim() || '';
                 const appSubtitle = row[5]?.trim() || '';
@@ -128,14 +129,16 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
 
                 if (!url) continue;
 
-                // Check for missing fields
-                const isEmpty = (val) => !val || val === 'NOT_FOUND' || val === 'SKIP' || val === 'EMPTY';
+                // SKIP logic: if Column C has any link-like data
+                const isNotEmpty = (val) => val && val.length > 5 && val !== 'NOT_FOUND' && val !== 'SKIP' && val !== 'EMPTY';
 
-                const hasLink = !isEmpty(storeLink);
+                if (isNotEmpty(storeLink)) {
+                    skippedCount++;
+                    continue;
+                }
 
-                // Row needs processing if it's missing App Link (Column C)
-                if (hasLink) {
-                    continue; // Skip - already has a link in Column C
+                if (toProcess.length < 3) {
+                    console.log(`  🔍 Row ${actualRowIndex + 1} check: URL=${url.substring(0, 30)}... | Link in C="${storeLink}" -> KEEP`);
                 }
 
                 toProcess.push({
@@ -148,7 +151,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
             }
 
             totalProcessed += rows.length;
-            console.log(`  ✓ Processed ${totalProcessed} rows, found ${toProcess.length} to process`);
+            process.stdout.write(`  ✓ Scanned ${totalProcessed} rows... found ${toProcess.length} (skipped ${skippedCount})\r`);
 
             // If we got less than batchSize rows, we've reached the end
             if (rows.length < batchSize) {
@@ -156,17 +159,16 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
             } else {
                 startRow = endRow + 1;
                 // Small delay between batches to avoid rate limits
-                await sleep(100);
+                await sleep(50);
             }
         } catch (error) {
-            console.error(`  ⚠️ Error loading batch starting at row ${startRow}: ${error.message}`);
+            console.error(`\n  ⚠️ Error loading batch starting at row ${startRow}: ${error.message}`);
             // If error, try to continue with next batch
             startRow += batchSize;
             await sleep(500); // Wait a bit longer on error
         }
     }
-
-    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing\n`);
+    console.log(`\n📊 Total: ${totalProcessed} scanned, ${toProcess.length} to process, ${skippedCount} items already have links.`);
     return toProcess;
 }
 
