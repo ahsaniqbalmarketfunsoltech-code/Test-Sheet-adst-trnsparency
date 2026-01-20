@@ -661,18 +661,32 @@ async function extractTextAdData(page, config) {
                     const spanElements = container.querySelectorAll('span');
                     let foundAppName = false;
                     
+                    // Helper function to check if text is valid (not CSS/technical garbage)
+                    const isValidAppName = (text) => {
+                        if (!text || typeof text !== 'string') return false;
+                        const t = text.trim();
+                        // Reject CSS classes (starts with dot, contains CSS properties)
+                        if (t.startsWith('.') || t.includes('***') || t.includes('color:') || t.includes('var(--')) return false;
+                        // Reject CSS-like patterns
+                        if (/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(t) && t.length > 20 && !/\s/.test(t)) return false; // Long class names
+                        if (t.includes('px') || t.includes('em') || t.includes('rem')) return false;
+                        // Reject if looks like code/technical
+                        if (t.includes('{') || t.includes('}') || t.includes(';') || t.includes(':')) return false;
+                        // Must have some normal text
+                        if (t.length < 3 || t.length > 150) return false;
+                        // Reject common non-app text
+                        if (t.toLowerCase().includes('install') || t.toLowerCase().includes('download') ||
+                            t.toLowerCase().includes('get it') || t.toLowerCase().includes('play store') ||
+                            t.toLowerCase().includes('advertisement')) return false;
+                        return true;
+                    };
+                    
                     for (const span of spanElements) {
                         const text = (span.innerText || span.textContent || '').trim();
                         const rect = span.getBoundingClientRect();
                         
                         // Check if span is above the headline and visible
-                        if (rect.top < headlineRect.top && rect.width > 0 && rect.height > 0 && 
-                            text && text.length > 3 && text.length < 150 &&
-                            !text.toLowerCase().includes('install') &&
-                            !text.toLowerCase().includes('download') &&
-                            !text.toLowerCase().includes('get it') &&
-                            !text.toLowerCase().includes('play store') &&
-                            !text.toLowerCase().includes('advertisement')) {
+                        if (rect.top < headlineRect.top && rect.width > 0 && rect.height > 0 && isValidAppName(text)) {
                             // Check if it's reasonably close (within 100px above)
                             const distance = headlineRect.top - rect.bottom;
                             if (distance > 0 && distance < 100) {
@@ -692,9 +706,7 @@ async function extractTextAdData(page, config) {
                         for (const child of children) {
                             if (child === targetElement) break; // Stop at headline element
                             const childText = (child.innerText || child.textContent || '').trim();
-                            if (childText && childText.length > 3 && childText.length < 150 &&
-                                !childText.toLowerCase().includes('install') &&
-                                !childText.toLowerCase().includes('download')) {
+                            if (isValidAppName(childText)) {
                                 data.appName = childText;
                                 foundAppName = true;
                                 break;
@@ -706,12 +718,7 @@ async function extractTextAdData(page, config) {
                     if (!foundAppName) {
                         for (const span of spanElements) {
                             const text = (span.innerText || span.textContent || '').trim();
-                            if (text && text.length > 5 && text.length < 150 && 
-                                text !== headlineText && // Don't use headline as app name
-                                !text.toLowerCase().includes('install') &&
-                                !text.toLowerCase().includes('download') &&
-                                !text.toLowerCase().includes('get it') &&
-                                !text.toLowerCase().includes('play store')) {
+                            if (isValidAppName(text) && text !== headlineText) { // Don't use headline as app name
                                 const rect = span.getBoundingClientRect();
                                 if (rect.width > 0 && rect.height > 0 && rect.top > 0 && rect.left > 0) {
                                     const distance = Math.abs(rect.top - headlineRect.top);
@@ -756,9 +763,12 @@ async function extractTextAdData(page, config) {
                     const playStoreMatch = containerHTML.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/i);
                     if (playStoreMatch && playStoreMatch[1]) {
                         const pkg = playStoreMatch[1];
-                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                        // Validate: must be a valid Android package name (com.*, org.*, etc.)
+                        if ((pkg.startsWith('com.') || pkg.startsWith('org.') || pkg.startsWith('net.')) && 
+                            pkg.split('.').length >= 3 &&
                             !pkg.includes('google') && !pkg.includes('android') &&
-                            pkg.length > 10) {
+                            pkg.length > 10 && pkg.length < 100 &&
+                            /^[a-z][a-z0-9_.]*$/.test(pkg)) { // Only lowercase letters, numbers, dots, underscores
                             data.packageName = pkg;
                         }
                     }
@@ -768,18 +778,21 @@ async function extractTextAdData(page, config) {
                         const metaElements = container.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]');
                         for (const meta of metaElements) {
                             const metaValue = meta.getAttribute('data-asoch-meta') || '';
-                            if (metaValue.includes('play.google.com')) {
-                                const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
-                                if (match && match[1]) {
-                                    const pkg = match[1];
-                                    if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
-                                        !pkg.includes('google') && !pkg.includes('android') &&
-                                        pkg.length > 10) {
-                                        data.packageName = pkg;
-                                        break;
+                                    if (metaValue.includes('play.google.com')) {
+                                        const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
+                                        if (match && match[1]) {
+                                            const pkg = match[1].toLowerCase(); // Normalize to lowercase
+                                            // Validate: must be a valid Android package name
+                                            if ((pkg.startsWith('com.') || pkg.startsWith('org.') || pkg.startsWith('net.')) && 
+                                                pkg.split('.').length >= 3 &&
+                                                !pkg.includes('google') && !pkg.includes('android') &&
+                                                pkg.length > 10 && pkg.length < 100 &&
+                                                /^[a-z][a-z0-9_.]*$/.test(pkg)) {
+                                                data.packageName = pkg;
+                                                break;
+                                            }
+                                        }
                                     }
-                                }
-                            }
                         }
                     }
                     
@@ -798,10 +811,13 @@ async function extractTextAdData(page, config) {
                                 for (const pattern of patterns) {
                                     const match = scriptText.match(pattern);
                                     if (match && match[1]) {
-                                        const pkg = match[1];
-                                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                                        const pkg = match[1].toLowerCase(); // Normalize to lowercase
+                                        // Validate: must be a valid Android package name
+                                        if ((pkg.startsWith('com.') || pkg.startsWith('org.') || pkg.startsWith('net.')) && 
+                                            pkg.split('.').length >= 3 &&
                                             !pkg.includes('google') && !pkg.includes('android') &&
-                                            !pkg.includes('example') && pkg.length > 10) {
+                                            !pkg.includes('example') && pkg.length > 10 && pkg.length < 100 &&
+                                            /^[a-z][a-z0-9_.]*$/.test(pkg)) {
                                             data.packageName = pkg;
                                             break;
                                         }
@@ -855,7 +871,13 @@ async function extractTextAdData(page, config) {
                                         if (metaValue.includes('play.google.com')) {
                                             const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
                                             if (match && match[1]) {
-                                                return match[1];
+                                                const pkg = match[1].toLowerCase();
+                                                // Validate: must be a valid Android package name
+                                                if ((pkg.startsWith('com.') || pkg.startsWith('org.') || pkg.startsWith('net.')) && 
+                                                    pkg.split('.').length >= 3 && pkg.length > 10 && pkg.length < 100 &&
+                                                    /^[a-z][a-z0-9_.]*$/.test(pkg)) {
+                                                    return pkg;
+                                                }
                                             }
                                         }
                                     }
@@ -893,9 +915,19 @@ async function extractTextAdData(page, config) {
                                         // Pattern 1: Direct Play Store links (most reliable)
                                         const playStoreMatches = pageContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi);
                                         if (playStoreMatches && playStoreMatches.length > 0) {
-                                            // Use first match
-                                            const pkg = playStoreMatches[0].match(/id=([a-z0-9_.]+)/i);
-                                            if (pkg && pkg[1]) return pkg[1];
+                                            // Use first valid match
+                                            for (const match of playStoreMatches) {
+                                                const pkgMatch = match.match(/id=([a-z0-9_.]+)/i);
+                                                if (pkgMatch && pkgMatch[1]) {
+                                                    const pkg = pkgMatch[1].toLowerCase();
+                                                    // Validate: must be a valid Android package name
+                                                    if ((pkg.startsWith('com.') || pkg.startsWith('org.') || pkg.startsWith('net.')) && 
+                                                        pkg.split('.').length >= 3 && pkg.length > 10 && pkg.length < 100 &&
+                                                        /^[a-z][a-z0-9_.]*$/.test(pkg)) {
+                                                        return pkg;
+                                                    }
+                                                }
+                                            }
                                         }
                                         
                                         // Pattern 2: data-asoch-meta (very reliable)
@@ -904,7 +936,15 @@ async function extractTextAdData(page, config) {
                                             const metaValue = meta.getAttribute('data-asoch-meta') || '';
                                             if (metaValue.includes('play.google.com')) {
                                                 const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
-                                                if (match && match[1]) return match[1];
+                                                if (match && match[1]) {
+                                                    const pkg = match[1].toLowerCase();
+                                                    // Validate: must be a valid Android package name
+                                                    if ((pkg.startsWith('com.') || pkg.startsWith('org.') || pkg.startsWith('net.')) && 
+                                                        pkg.split('.').length >= 3 && pkg.length > 10 && pkg.length < 100 &&
+                                                        /^[a-z][a-z0-9_.]*$/.test(pkg)) {
+                                                        return pkg;
+                                                    }
+                                                }
                                             }
                                         }
                                         
@@ -930,10 +970,16 @@ async function extractTextAdData(page, config) {
                                 const playStoreMatches = pageContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi);
                                 if (playStoreMatches) {
                                     for (const match of playStoreMatches) {
-                                        const pkg = match.match(/id=([a-z0-9_.]+)/i);
-                                        if (pkg && pkg[1] && pkg[1].startsWith('com.') && pkg[1].split('.').length >= 3 &&
-                                            !pkg[1].includes('google') && !pkg[1].includes('android') && pkg[1].length > 10) {
-                                            return pkg[1];
+                                        const pkgMatch = match.match(/id=([a-z0-9_.]+)/i);
+                                        if (pkgMatch && pkgMatch[1]) {
+                                            const pkg = pkgMatch[1].toLowerCase();
+                                            // Validate: must be a valid Android package name
+                                            if ((pkg.startsWith('com.') || pkg.startsWith('org.') || pkg.startsWith('net.')) && 
+                                                pkg.split('.').length >= 3 && pkg.length > 10 && pkg.length < 100 &&
+                                                !pkg.includes('google') && !pkg.includes('android') &&
+                                                /^[a-z][a-z0-9_.]*$/.test(pkg)) {
+                                                return pkg;
+                                            }
                                         }
                                     }
                                 }
