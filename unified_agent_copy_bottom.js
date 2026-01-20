@@ -711,34 +711,37 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         // For video ads: .ns-yp8c1-e-18.headline (e.g., "Best File Manager of 2024")
                         // =====================================================
                         const subtitleSelectors = [
-                            // Video ad selectors (priority)
+                            // Text/image ad selectors (PRIORITY for text ads)
+                            '.c54Vcb-vmv8lc',
+                            'div.c54Vcb-vmv8lc',
+                            // Video ad selectors
                             '.ns-yp8c1-e-18.headline',
                             '[class*="yp8c1"][class*="headline"]',
                             '.headline',
                             '[class*="ns-"][class*="-e-18"]',
-                            // Text/image ad selectors
-                            '.c54Vcb-vmv8lc',
-                            'div.c54Vcb-vmv8lc',
                             '[class*="vmv8lc"]',
                             '[class*="tagline"]',
                             '[class*="subtitle"]',
                             '[class*="description"]'
                         ];
-                        for (const sel of subtitleSelectors) {
-                            try {
-                                const el = root.querySelector(sel);
-                                if (el) {
-                                    const text = (el.innerText || el.textContent || '').trim();
-                                    // Clean the subtitle text
-                                    if (text && text.length >= 3 && text.length <= 150) {
-                                        // Avoid CSS garbage or numeric-only text
-                                        if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
-                                            data.appSubtitle = text;
-                                            break;
+                        // First try on root, then on document
+                        for (const searchRoot of [root, document]) {
+                            if (data.appSubtitle) break;
+                            for (const sel of subtitleSelectors) {
+                                try {
+                                    const el = searchRoot.querySelector(sel);
+                                    if (el) {
+                                        const text = (el.innerText || el.textContent || '').trim();
+                                        // Relaxed validation - just check length and not pure numbers/symbols
+                                        if (text && text.length >= 3 && text.length <= 200) {
+                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes('{')) {
+                                                data.appSubtitle = text;
+                                                break;
+                                            }
                                         }
                                     }
-                                }
-                            } catch (e) { }
+                                } catch (e) { }
+                            }
                         }
 
                         // =====================================================
@@ -872,10 +875,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         }
 
                         // Third pass: Search for meta metadata (especially for text ads)
+                        // NOTE: meta tags are in <head>, so we search document not root
                         if (!data.storeLink) {
-                            const metaElements = root.querySelectorAll('meta[data-asoch-meta], div[data-asoch-meta]');
+                            const metaElements = document.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]');
                             for (const meta of metaElements) {
                                 const metaValue = meta.getAttribute('data-asoch-meta') || '';
+
+                                // Method 1: Look for full play.google.com URL with id= parameter
                                 if (metaValue.includes('play.google.com')) {
                                     const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
                                     if (match && match[1]) {
@@ -883,11 +889,37 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                         break;
                                     }
                                 }
-                                // Generic package name match in the meta string
-                                const pkgMatch = metaValue.match(/["']([a-z][a-z0-9_]*(\.[a-z0-9_]+)+)["']/i);
-                                if (pkgMatch && pkgMatch[1] && !pkgMatch[1].includes('google') && !pkgMatch[1].includes('example')) {
-                                    data.storeLink = `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
-                                    break;
+
+                                // Method 2: Look for adurl with encoded Play Store URL
+                                if (metaValue.includes('adurl=')) {
+                                    const adurlMatch = metaValue.match(/adurl=([^"'\s\]]+)/);
+                                    if (adurlMatch && adurlMatch[1]) {
+                                        try {
+                                            const decodedUrl = decodeURIComponent(adurlMatch[1]);
+                                            const pkgMatch = decodedUrl.match(/id=([a-zA-Z0-9._]+)/);
+                                            if (pkgMatch && pkgMatch[1]) {
+                                                data.storeLink = `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
+                                                break;
+                                            }
+                                        } catch (e) { }
+                                    }
+                                }
+
+                                // Method 3: Generic package name match in the meta string
+                                const pkgMatches = metaValue.match(/["']([a-z][a-z0-9_]*(\.[a-z0-9_]+){2,})["']/gi);
+                                if (pkgMatches) {
+                                    for (const pkg of pkgMatches) {
+                                        const cleanPkg = pkg.replace(/["']/g, '');
+                                        if (!cleanPkg.includes('google') &&
+                                            !cleanPkg.includes('example') &&
+                                            !cleanPkg.includes('android.') &&
+                                            !cleanPkg.startsWith('com.google') &&
+                                            cleanPkg.split('.').length >= 3) {
+                                            data.storeLink = `https://play.google.com/store/apps/details?id=${cleanPkg}`;
+                                            break;
+                                        }
+                                    }
+                                    if (data.storeLink) break;
                                 }
                             }
                         }

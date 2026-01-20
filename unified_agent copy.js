@@ -576,30 +576,36 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         }
 
                         // =====================================================
-                        // EXTRACT APP SUBTITLE/TAGLINE
+                        // EXTRACT APP SUBTITLE/TAGLINE (for text ads: div.c54Vcb-vmv8lc)
                         // =====================================================
                         const subtitleSelectors = [
-                            '.ns-yp8c1-e-18.headline',
+                            '.c54Vcb-vmv8lc',           // Text ad headline (priority)
+                            'div.c54Vcb-vmv8lc',        // Explicit text ad headline
+                            '.ns-yp8c1-e-18.headline',  // Video ad headline
                             '[class*="yp8c1"][class*="headline"]',
                             '.headline',
-                            '.c54Vcb-vmv8lc',
                             '[class*="vmv8lc"]',
                             '[class*="tagline"]',
                             '[class*="subtitle"]'
                         ];
-                        for (const sel of subtitleSelectors) {
-                            try {
-                                const el = root.querySelector(sel);
-                                if (el) {
-                                    const text = (el.innerText || el.textContent || '').trim();
-                                    if (text && text.length >= 3 && text.length <= 150) {
-                                        if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
-                                            data.appSubtitle = text;
-                                            break;
+                        // First try on root, then on document
+                        for (const searchRoot of [root, document]) {
+                            if (data.appSubtitle) break;
+                            for (const sel of subtitleSelectors) {
+                                try {
+                                    const el = searchRoot.querySelector(sel);
+                                    if (el) {
+                                        const text = (el.innerText || el.textContent || '').trim();
+                                        // Relaxed validation - just check length and not pure numbers/symbols
+                                        if (text && text.length >= 3 && text.length <= 200) {
+                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes('{')) {
+                                                data.appSubtitle = text;
+                                                break;
+                                            }
                                         }
                                     }
-                                }
-                            } catch (e) { }
+                                } catch (e) { }
+                            }
                         }
 
                         // =====================================================
@@ -737,10 +743,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         // =====================================================
                         // TEXT AD STORE LINK EXTRACTION (from meta tag)
                         // For text ads, the package name is in <meta data-asoch-meta>
+                        // NOTE: meta tags are in <head>, so we search document not root
                         // =====================================================
                         if (!data.storeLink) {
-                            // Search for meta tag with data-asoch-meta attribute
-                            const metaElements = root.querySelectorAll('meta[data-asoch-meta], div[data-asoch-meta], *[data-asoch-meta]');
+                            // Search for meta tag with data-asoch-meta attribute - search DOCUMENT not root (meta is in head)
+                            const metaElements = document.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]');
                             for (const meta of metaElements) {
                                 const metaValue = meta.getAttribute('data-asoch-meta') || '';
 
