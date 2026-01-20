@@ -28,7 +28,7 @@ const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Test'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 2000; // Rows to load per batch
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 3; // Process 3 rows at a time
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 3; // Process 3 rows at a time (FIXED: always 3)
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
 const POST_CLICK_WAIT = 6000;
@@ -119,9 +119,13 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
 
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
-                // CRITICAL: actualRowIndex is 0-based (0=header, 1=first data row)
-                // This will be converted to 1-based when writing: rowNum = rowIndex + 1
-                const actualRowIndex = startRow + i; // 0-based row index (1 = row 2 in sheet)
+                // CRITICAL: Row indexing logic
+                // - startRow = 1 (0-based index, represents row 2 in sheet)
+                // - Range reads from row startRow+1 = row 2 in sheet
+                // - actualRowIndex = startRow + i (0-based: 1 = row 2, 2 = row 3, etc.)
+                // - When writing: rowNum = rowIndex + 1 (converts to 1-based for Google Sheets)
+                //   Example: rowIndex 1 -> rowNum 2 (correct for row 2 in sheet)
+                const actualRowIndex = startRow + i;
                 const url = (row[1] || '').trim();
                 const storeLink = (row[2] || '').trim();
                 const appName = row[3]?.trim() || '';
@@ -179,56 +183,78 @@ async function batchWriteToSheet(sheets, updates) {
 
     const data = [];
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId, appSubtitle, imageUrl }) => {
-        // CRITICAL: rowIndex is 0-based, rowNum is 1-based (Google Sheets)
+        // CRITICAL: rowIndex is 0-based (0=header, 1=first data row), rowNum is 1-based (Google Sheets)
+        // rowIndex 1 = row 2 in sheet, rowIndex 2 = row 3 in sheet, etc.
         const rowNum = rowIndex + 1;
 
-        // Log which row we're writing to for verification
-        const hasData = (advertiserName && !['SKIP', 'NOT_FOUND', 'BLOCKED', 'ERROR'].includes(advertiserName)) ||
-            (storeLink && storeLink !== 'SKIP' && storeLink !== 'ERROR') ||
-            (appName && appName !== 'SKIP' && appName !== 'ERROR');
+        // Helper function to check if value is valid (not dummy/placeholder data)
+        const isValidValue = (val) => {
+            if (!val || typeof val !== 'string') return false;
+            const valUpper = val.toUpperCase();
+            return !['SKIP', 'NOT_FOUND', 'BLOCKED', 'ERROR', 'EMPTY', ''].includes(valUpper) && val.trim().length > 0;
+        };
 
-        if (hasData) {
-            console.log(`  📝 Writing data to Row ${rowNum} (rowIndex=${rowIndex})`);
+        // Check if we have ANY valid data to write
+        const hasValidData = isValidValue(advertiserName) || isValidValue(storeLink) || 
+                            isValidValue(appName) || isValidValue(videoId) || 
+                            isValidValue(appSubtitle) || isValidValue(imageUrl);
+
+        // Only write if we have valid data (don't write dummy data)
+        if (!hasValidData) {
+            console.log(`  ⏭️  Row ${rowNum}: No valid data found, skipping write`);
+            return; // Skip this row entirely
         }
 
-        // Only write advertiser name if it's found and not a generic skip/error
-        if (advertiserName && !['SKIP', 'NOT_FOUND', 'BLOCKED', 'ERROR'].includes(advertiserName)) {
-            data.push({ range: `'${SHEET_NAME}'!A${rowNum}`, values: [[advertiserName]] });
+        console.log(`  📝 Writing data to Row ${rowNum} (rowIndex=${rowIndex})`);
+
+        // Only write advertiser name if it's valid
+        if (isValidValue(advertiserName)) {
+            data.push({ range: `'${SHEET_NAME}'!A${rowNum}`, values: [[advertiserName.trim()]] });
         }
 
-        if (storeLink && storeLink !== 'SKIP' && storeLink !== 'ERROR') {
-            data.push({ range: `'${SHEET_NAME}'!C${rowNum}`, values: [[storeLink]] });
+        // Only write store link if it's valid
+        if (isValidValue(storeLink)) {
+            data.push({ range: `'${SHEET_NAME}'!C${rowNum}`, values: [[storeLink.trim()]] });
         }
 
-        if (appName && appName !== 'SKIP' && appName !== 'ERROR') {
-            data.push({ range: `'${SHEET_NAME}'!D${rowNum}`, values: [[appName]] });
+        // Only write app name if it's valid
+        if (isValidValue(appName)) {
+            data.push({ range: `'${SHEET_NAME}'!D${rowNum}`, values: [[appName.trim()]] });
         }
 
-        if (videoId && videoId !== 'SKIP' && videoId !== 'ERROR') {
-            data.push({ range: `'${SHEET_NAME}'!E${rowNum}`, values: [[videoId]] });
+        // Only write video ID if it's valid
+        if (isValidValue(videoId)) {
+            data.push({ range: `'${SHEET_NAME}'!E${rowNum}`, values: [[videoId.trim()]] });
         }
 
-        // Subtitle and Image
-        if (appSubtitle && appSubtitle !== 'SKIP') {
-            data.push({ range: `'${SHEET_NAME}'!F${rowNum}`, values: [[appSubtitle]] });
-        }
-        if (imageUrl && imageUrl !== 'SKIP') {
-            data.push({ range: `'${SHEET_NAME}'!G${rowNum}`, values: [[imageUrl]] });
+        // Only write subtitle if it's valid
+        if (isValidValue(appSubtitle)) {
+            data.push({ range: `'${SHEET_NAME}'!F${rowNum}`, values: [[appSubtitle.trim()]] });
         }
 
-        // Timestamp
-        const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
-        data.push({ range: `'${SHEET_NAME}'!M${rowNum}`, values: [[timestamp]] });
+        // Only write image URL if it's valid
+        if (isValidValue(imageUrl)) {
+            data.push({ range: `'${SHEET_NAME}'!G${rowNum}`, values: [[imageUrl.trim()]] });
+        }
+
+        // Only write timestamp if we wrote at least one valid field
+        if (data.length > 0) {
+            const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
+            data.push({ range: `'${SHEET_NAME}'!M${rowNum}`, values: [[timestamp]] });
+        }
     });
 
-    if (data.length === 0) return;
+    if (data.length === 0) {
+        console.log(`  ⏭️  No valid data to write for this batch`);
+        return;
+    }
 
     try {
         await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
             resource: { valueInputOption: 'RAW', data: data }
         });
-        console.log(`  ✅ Wrote ${updates.length} results to sheet`);
+        console.log(`  ✅ Wrote ${data.filter(d => !d.range.includes('M')).length} valid fields to sheet`);
     } catch (error) {
         console.error(`  ❌ Write error:`, error.message);
     }
@@ -1243,7 +1269,8 @@ async function extractWithRetry(item, browser) {
         consecutiveSuccessBatches = 0;
 
         while (sessionProcessed < currentSessionSize && !blocked) {
-            const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
+            // FIXED: Always process exactly 3 items at a time (or remaining items if less than 3)
+            const batchSize = Math.min(3, currentSessionSize - sessionProcessed);
             const batch = toProcess.slice(currentIndex, currentIndex + batchSize);
 
             console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length}`);
