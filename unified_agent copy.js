@@ -290,8 +290,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // Remove special markers
         cleaned = cleaned.split('!@~!@~')[0];
-        if (cleaned.includes('|')) {
-            cleaned = cleaned.split('|')[0];
+        
+        // FIXED: Don't split on | - keep full name
+        // Only split if it's clearly a separator (with spaces around it)
+        if (cleaned.includes(' | ') || cleaned.match(/\s+\|\s+/)) {
+            const parts = cleaned.split(/\s*\|\s*/).map(p => p.trim()).filter(p => p.length > 2);
+            if (parts.length > 1 && parts[0].length > 5) {
+                cleaned = parts[0]; // Use first part if substantial
+            }
+            // Otherwise keep full text
         }
 
         // Normalize whitespace
@@ -754,14 +761,35 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         const cleanAppName = (text) => {
                             if (!text || typeof text !== 'string') return null;
                             let clean = text.trim();
+                            
+                            // Remove invisible unicode characters
                             clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
+                            
+                            // Remove CSS-like patterns but keep the actual text
                             clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
                             clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
+                            
+                            // Split on special markers but keep full text
                             clean = clean.split('!@~!@~')[0];
-                            if (clean.includes('|')) {
-                                const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
-                                if (parts.length > 0) clean = parts[0];
+                            
+                            // FIXED: Don't split on | - keep full app name
+                            // Many app names contain | as part of the name (e.g., "App Name | Tagline")
+                            // Only split if it's clearly a separator with whitespace around it
+                            if (clean.includes(' | ') || clean.includes('| ')) {
+                                // Only split if there are multiple parts separated by |
+                                const parts = clean.split(/\s*\|\s*/).map(p => p.trim()).filter(p => p.length > 2);
+                                // If multiple parts, check if first part looks like complete app name
+                                if (parts.length > 1) {
+                                    // Use first part if it's substantial (more than 5 chars), otherwise use full text
+                                    if (parts[0].length > 5) {
+                                        clean = parts[0];
+                                    } else {
+                                        // Keep full text if first part is too short
+                                        clean = parts.join(' | ');
+                                    }
+                                }
                             }
+                            
                             clean = clean.replace(/\s+/g, ' ').trim();
 
                             // Blacklist for app names
@@ -773,7 +801,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             ];
                             if (blacklistNames.some(name => clean.toLowerCase() === name || clean.toLowerCase().includes(name))) return null;
 
-                            if (clean.length < 2 || clean.length > 80) return null;
+                            // FIXED: Increased max length to 150 to capture full app names
+                            if (clean.length < 2 || clean.length > 150) return null;
                             if (/^[\d\s\W]+$/.test(clean)) return null;
                             return clean;
                         };
@@ -935,7 +964,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     // Extract Image URL if found
                     if (frameData.imageUrl && result.imageUrl === 'NOT_FOUND') {
                         result.imageUrl = frameData.imageUrl;
-                        console.log(`  🖼️ Found Image URL: ${result.imageUrl.substring(0, 50)}...`);
+                        console.log(`  🖼️ Found Image URL (iframe): ${result.imageUrl.substring(0, 60)}...`);
+                    } else if (frameData.imageUrl && result.imageUrl !== 'NOT_FOUND' && result.imageUrl !== frameData.imageUrl) {
+                        // If we found a different image URL, prefer simgad URLs
+                        if (frameData.imageUrl.includes('tpc.googlesyndication.com/simgad/') || 
+                            frameData.imageUrl.includes('googlesyndication.com/simgad/')) {
+                            result.imageUrl = frameData.imageUrl;
+                            console.log(`  🖼️ Updated Image URL (iframe, simgad): ${result.imageUrl.substring(0, 60)}...`);
+                        }
                     }
 
                     // Skip hidden frames
@@ -1244,25 +1280,55 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
             // =====================================================
             // FALLBACK FOR IMAGE URL (HTML Content - for Image Ads)
-            // Search raw HTML for tpc.googlesyndication.com/simgad/ URLs
+            // Search raw HTML + iframe content for tpc.googlesyndication.com/simgad/ URLs
             // =====================================================
             if (result.imageUrl === 'NOT_FOUND') {
-                console.log(`  🔍 Searching HTML content for image URL...`);
+                console.log(`  🔍 Searching HTML content (main + iframes) for image URL...`);
                 try {
-                    const allContent = await page.content();
+                    // Collect HTML from main page AND all accessible frames (same as store link search)
+                    let allContent = await page.content();
+                    
+                    // Get content from all frames
+                    const frames = page.frames();
+                    let accessibleFrames = 0;
+                    for (const frame of frames) {
+                        try {
+                            const frameContent = await frame.content();
+                            allContent += frameContent;
+                            accessibleFrames++;
+                        } catch (e) {
+                            // Cross-origin iframe, skip
+                        }
+                    }
+                    console.log(`  📄 Accessible frames for image search: ${accessibleFrames}/${frames.length}`);
+                    console.log(`  📄 Total HTML content length: ${allContent.length} chars`);
                     
                     // Look for tpc.googlesyndication.com/simgad/ URLs in HTML
-                    const simgadMatches = allContent.match(/https?:\/\/tpc\.googlesyndication\.com\/simgad\/([0-9]+)/g);
+                    // Pattern: https://tpc.googlesyndication.com/simgad/16734786139589322994
+                    // Match full URL including the number
+                    const simgadMatches = allContent.match(/https?:\/\/tpc\.googlesyndication\.com\/simgad\/[0-9]+/g);
+                    console.log(`  🖼️ tpc.googlesyndication.com/simgad/ matches: ${simgadMatches ? simgadMatches.length : 0}`);
+                    
                     if (simgadMatches && simgadMatches.length > 0) {
                         // Use the first match (should be the ad image)
                         result.imageUrl = simgadMatches[0];
                         console.log(`  🖼️ Found Image URL (HTML content): ${result.imageUrl.substring(0, 60)}...`);
                     } else {
-                        // Fallback: Look for any googlesyndication.com/simgad/ pattern
-                        const googlesyndicationMatches = allContent.match(/https?:\/\/[^"'\s]+googlesyndication\.com\/simgad\/[^"'\s]+/g);
+                        // Fallback: Look for any googlesyndication.com/simgad/ pattern (more flexible)
+                        const googlesyndicationMatches = allContent.match(/https?:\/\/[^"'\s<>]+googlesyndication\.com\/simgad\/[^"'\s<>]+/g);
+                        console.log(`  🖼️ googlesyndication.com/simgad/ matches: ${googlesyndicationMatches ? googlesyndicationMatches.length : 0}`);
+                        
                         if (googlesyndicationMatches && googlesyndicationMatches.length > 0) {
-                            result.imageUrl = googlesyndicationMatches[0];
+                            // Filter to get only tpc.googlesyndication.com URLs
+                            const tpcMatches = googlesyndicationMatches.filter(url => url.includes('tpc.googlesyndication.com'));
+                            if (tpcMatches.length > 0) {
+                                result.imageUrl = tpcMatches[0];
+                            } else {
+                                result.imageUrl = googlesyndicationMatches[0];
+                            }
                             console.log(`  🖼️ Found Image URL (HTML content): ${result.imageUrl.substring(0, 60)}...`);
+                        } else {
+                            console.log(`  ⚠️ No image URL found in HTML content`);
                         }
                     }
                 } catch (e) {
