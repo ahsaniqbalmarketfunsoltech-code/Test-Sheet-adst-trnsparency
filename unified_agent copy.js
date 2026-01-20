@@ -775,10 +775,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 // ============================================
 // MAIN EXECUTION
 // ============================================
-                        const data = { appName: null, storeLink: null, isVideo: false, appSubtitle: null, imageUrl: null };
-                        const root = document.querySelector('#portrait-landscape-phone') || document.body;
-
-                        // Check if this frame content is visible (has dimensions)
                         const bodyRect = document.body.getBoundingClientRect();
                         if (bodyRect.width < 50 || bodyRect.height < 50) {
                             return { ...data, isHidden: true };
