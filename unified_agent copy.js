@@ -582,7 +582,50 @@ async function extractTextAdData(page, config) {
                 
                 console.log(`  ✅ Found text ad element in ${ctx.name}`);
                 
-                // Step 2: Get the element's container and hover on it
+                // Step 2: Scroll element into view and try to hover
+                try {
+                    // Scroll element into view first
+                    await textAdElement.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+                    await sleep(300);
+                    
+                    // Try to find a hoverable parent element (div, a, etc.)
+                    let hoverableElement = textAdElement;
+                    try {
+                        const parentElement = await textAdElement.evaluateHandle(el => {
+                            // Try to find a parent that's hoverable (div, a, span with pointer events)
+                            let parent = el.parentElement;
+                            while (parent && parent !== document.body) {
+                                const tag = parent.tagName.toLowerCase();
+                                if (tag === 'div' || tag === 'a' || tag === 'span' || tag === 'article') {
+                                    return parent;
+                                }
+                                parent = parent.parentElement;
+                            }
+                            return el; // Fallback to original element
+                        });
+                        hoverableElement = parentElement.asElement();
+                        if (!hoverableElement) hoverableElement = textAdElement;
+                    } catch (e) {
+                        // If that fails, use original element
+                        hoverableElement = textAdElement;
+                    }
+                    
+                    // Try hover using JavaScript event instead of Puppeteer's hover
+                    await hoverableElement.evaluate(el => {
+                        const event = new MouseEvent('mouseenter', {
+                            view: window,
+                            bubbles: true,
+                            cancelable: true
+                        });
+                        el.dispatchEvent(event);
+                    });
+                    await sleep(500);
+                } catch (hoverError) {
+                    console.log(`  ⚠️ Hover failed in ${ctx.name}, extracting without hover: ${hoverError.message}`);
+                    // Continue without hover - we'll extract anyway
+                }
+                
+                // Step 3: Get element info for extraction
                 const elementInfo = await textAdElement.evaluate(el => {
                     // Find the parent container that likely contains all ad data
                     let container = el.closest('[class*="ad"], [class*="creative"], [class*="preview"], [role="article"], [role="link"]');
@@ -594,21 +637,16 @@ async function extractTextAdData(page, config) {
                     };
                 });
                 
-                // Step 3: Hover on text ad element
-                await textAdElement.hover();
-                await sleep(800); // Wait longer for hover effects
-                
-                // Step 4: Extract all data from the hovered element's context
-                const extractedData = await context.evaluate((elementInfo) => {
+                // Step 4: Extract all data - use the element we already found
+                const extractedData = await textAdElement.evaluate((el) => {
                     const data = {
                         appName: null,
                         appHeadline: null,
                         packageName: null
                     };
                     
-                    // Find the hovered element (it should be highlighted/active)
-                    const hoveredElement = document.querySelector('.cS4Vcb-vnv8ic:hover, div.cS4Vcb-vnv8ic:hover, [class*="cS4Vcb"]:hover, [class*="vmv8lc"]:hover');
-                    const targetElement = hoveredElement || document.querySelector('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"], [class*="vmv8lc"]');
+                    // Use the element we already found (el parameter)
+                    const targetElement = el;
                     
                     if (!targetElement) return data;
                     
@@ -680,7 +718,7 @@ async function extractTextAdData(page, config) {
                     }
                     
                     return data;
-                }, elementInfo);
+                });
                 
                 // Debug: log what we extracted
                 console.log(`  🔍 Extracted from ${ctx.name}: appName="${extractedData.appName}", headline="${extractedData.appHeadline}", package="${extractedData.packageName}"`);
