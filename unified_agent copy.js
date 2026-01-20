@@ -131,29 +131,20 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                     continue; // Skip - already has Play Store link
                 }
 
-                // PRIORITIZE TEXT ADS: Ads with both app name AND subtitle/headline (but missing store link)
-                const isTextAd = appName && appName !== 'NOT_FOUND' && appName !== 'Ad Details' && 
-                                 appSubtitle && appSubtitle !== 'NOT_FOUND';
-                const needsStoreLink = !storeLink || storeLink === 'NOT_FOUND';
-                
-                // Only process text ads that need store link extraction
-                if (isTextAd && needsStoreLink) {
-                    toProcess.push({
-                        url,
-                        rowIndex: actualRowIndex,
-                        needsMetadata: true, // Force metadata extraction for text ads
-                        existingStoreLink: storeLink,
-                        isTextAd: true, // Flag to prioritize
-                        existingAppName: appName,
-                        existingAppSubtitle: appSubtitle
-                    });
-                }
-                // Skip all other ads (video ads, image ads without text, etc.) - focus only on text ads
+                // Process all rows that need metadata extraction
+                const needsMetadata = !storeLink || storeLink === 'NOT_FOUND' || !appName || !appSubtitle || !imageUrl;
+                toProcess.push({
+                    url,
+                    rowIndex: actualRowIndex,
+                    needsMetadata,
+                    existingStoreLink: storeLink,
+                    existingAppName: appName,
+                    existingAppSubtitle: appSubtitle
+                });
             }
 
             totalProcessed += rows.length;
-            const textAdsInBatch = toProcess.filter(x => x.isTextAd).length;
-            console.log(`  ✓ Processed ${totalProcessed} rows, found ${textAdsInBatch} text ads to process`);
+            console.log(`  ✓ Processed ${totalProcessed} rows, found ${toProcess.length} to process`);
 
             // If we got less than batchSize rows, we've reached the end
             if (rows.length < batchSize) {
@@ -826,32 +817,55 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                     // Skip hidden frames
                     if (frameData.isHidden) continue;
 
-                    // PRIORITY FOR TEXT ADS: If we found store link (from meta tag or other methods), use it immediately
+                    // DETECT TEXT AD: Check if we have BOTH app name AND subtitle/headline
+                    const foundAppName = frameData.appName && result.appName === 'NOT_FOUND';
+                    const foundSubtitle = frameData.appSubtitle && result.appSubtitle === 'NOT_FOUND';
+                    const hasAppName = foundAppName || (result.appName && result.appName !== 'NOT_FOUND' && result.appName !== 'Ad Details');
+                    const hasSubtitle = foundSubtitle || (result.appSubtitle && result.appSubtitle !== 'NOT_FOUND');
+                    const isTextAd = hasAppName && hasSubtitle;
+
+                    // If TEXT AD detected: Focus on store link extraction, skip other work
+                    if (isTextAd) {
+                        console.log(`  📝 TEXT AD DETECTED: Found name + subtitle - focusing on store link extraction`);
+                        
+                        // Store the name and subtitle if found
+                        if (foundAppName) {
+                            result.appName = cleanName(frameData.appName);
+                        }
+                        if (foundSubtitle) {
+                            result.appSubtitle = frameData.appSubtitle;
+                        }
+                        
+                        // PRIORITY: Extract store link for text ads
+                        if (frameData.storeLink && result.storeLink === 'NOT_FOUND') {
+                            result.storeLink = frameData.storeLink;
+                            console.log(`  ✓ TEXT AD COMPLETE: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
+                            break; // Text ad complete, stop searching
+                        }
+                        
+                        // Continue looking for store link in other frames
+                        continue;
+                    }
+
+                    // For non-text ads, continue normal extraction
+                    // If we found store link, use it
                     if (frameData.storeLink && result.storeLink === 'NOT_FOUND') {
                         result.storeLink = frameData.storeLink;
                         console.log(`  🔗 Found store link: ${result.storeLink.substring(0, 60)}...`);
-                        // For text ads, if we have subtitle and found store link, we're done with priority extraction
-                        if (result.appSubtitle && result.appSubtitle !== 'NOT_FOUND') {
-                            console.log(`  ✓ Text ad: Store link found`);
-                        }
                     }
 
-                    // If we found BOTH app name AND store link, use this immediately (high confidence)
+                    // If we found BOTH app name AND store link, use this immediately
                     if (frameData.appName && frameData.storeLink && result.appName === 'NOT_FOUND') {
                         result.appName = cleanName(frameData.appName);
                         result.storeLink = frameData.storeLink;
                         console.log(`  ✓ Found: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
-                        // For text ads with both name and link, we can break early
-                        if (result.appSubtitle && result.appSubtitle !== 'NOT_FOUND') {
-                            break; // Complete text ad found, stop searching
-                        }
                         break; // We have both, stop searching
                     }
 
-                    // If we only found name (no link), store it but keep looking for store link (priority for text ads)
+                    // If we only found name (no link), store it but keep looking
                     if (frameData.appName && !frameData.storeLink && result.appName === 'NOT_FOUND') {
                         result.appName = cleanName(frameData.appName);
-                        // DON'T break - continue looking for store link (more important for text ads)
+                        // DON'T break - continue looking
                     }
                     
                     // If we only found store link (no name), keep it but continue looking for name
@@ -960,10 +974,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
             // EXTRACT SUBTITLE - Only cS4Vcb-vnv8ic class with hover
             // Non-blocking: If this fails, other extractions continue
             // =====================================================
-            if (needsMetadata && result.appSubtitle === 'NOT_FOUND') {
+            // Only extract subtitle if we have app name (text ad detection)
+            const isTextAdForSubtitle = result.appName && result.appName !== 'NOT_FOUND' && result.appName !== 'Ad Details';
+            
+            if (needsMetadata && result.appSubtitle === 'NOT_FOUND' && isTextAdForSubtitle) {
                 // Run subtitle extraction in a separate try-catch to ensure it doesn't block other extractions
                 try {
-                    console.log(`  📝 Extracting subtitle (cS4Vcb-vnv8ic)...`);
+                    console.log(`  📝 Extracting subtitle for text ad (cS4Vcb-vnv8ic)...`);
                     
                     // Reduced wait for dynamic content (optimized for speed)
                     await sleep(500 + Math.random() * 300); // Reduced from 1000-1500ms to 500-800ms
