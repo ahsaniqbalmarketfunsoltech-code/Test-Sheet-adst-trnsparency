@@ -1023,73 +1023,64 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
             // =====================================================
             // FALLBACK FOR IMAGE URL (Main Page - for Image Ads)
-            // CRITICAL: Only get visible image from current ad preview
-            // Search main page for tpc.googlesyndication.com/simgad/ URLs
+            // CRITICAL: Hover on image element INSIDE visible ad container
+            // There are many #landscape-image elements, so hover to get the correct one
             // =====================================================
             if (result.imageUrl === 'NOT_FOUND') {
-                const mainImageUrl = await page.evaluate(() => {
-                    // CRITICAL: Find the actual ad preview container (landscape-view or portrait-view)
-                    const adViewContainer = document.querySelector('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
-                    if (!adViewContainer) return null;
+                try {
+                    // Step 1: Find the visible ad preview container
+                    const adViewContainer = await page.$('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
                     
-                    const imageSelectors = [
-                        // Priority 1: Specific image IDs within ad view (most reliable)
-                        '#landscape-image',
-                        '#portrait-image',
-                        'img#landscape-image',
-                        'img#portrait-image',
+                    if (adViewContainer) {
+                        // Step 2: Find the image element INSIDE this container
+                        const imageElement = await adViewContainer.$('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image, .landscape-image img, .portrait-image img');
                         
-                        // Priority 2: Images within landscape/portrait containers
-                        '.landscape-image img',
-                        '.portrait-image img',
-                        '.landscape-card img',
-                        '.portrait-card img',
-                        
-                        // Priority 3: Google syndication image URLs
-                        'img[src*="tpc.googlesyndication.com/simgad"]',
-                        'img[src*="googlesyndication.com/simgad"]'
-                    ];
-                    
-                    let foundSimgadImage = null;
-                    let foundImage = null;
-                    
-                    for (const sel of imageSelectors) {
-                        try {
-                            const images = adViewContainer.querySelectorAll(sel);
-                            for (const img of images) {
-                                if (!img || !img.src || !img.src.startsWith('http')) continue;
+                        if (imageElement) {
+                            // Step 3: Hover over the image element (this highlights the correct one)
+                            await imageElement.hover();
+                            await sleep(500); // Wait for hover effects
+                            
+                            // Step 4: Extract image URL and headline from the hovered element's container
+                            const imageData = await page.evaluate((containerSelector) => {
+                                const container = document.querySelector(containerSelector);
+                                if (!container) return null;
                                 
-                                // CRITICAL: Check if image is actually visible and substantial
-                                const rect = img.getBoundingClientRect();
-                                const isVisible = rect.width > 0 && rect.height > 0 && 
-                                                 rect.width > 50 && rect.height > 50; // Must be substantial size
+                                // Get image URL from the hovered image element
+                                const img = container.querySelector('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image, .landscape-image img, .portrait-image img');
+                                let imageUrl = null;
+                                if (img && img.src) {
+                                    imageUrl = img.src.trim();
+                                }
                                 
-                                if (!isVisible) continue; // Skip hidden/small images
+                                // Get headline/app name from the same container
+                                let headline = null;
+                                const headlineEl = container.querySelector('#landscape-app-title, #portrait-app-title, .landscape-app-title, .portrait-app-title');
+                                if (headlineEl) {
+                                    headline = (headlineEl.innerText || headlineEl.textContent || '').trim();
+                                }
                                 
-                                const imgSrc = img.src.trim();
+                                return { imageUrl, headline };
+                            }, '#landscape-view, #portrait-view, .landscape-view, .portrait-view');
+                            
+                            if (imageData) {
+                                if (imageData.imageUrl) {
+                                    result.imageUrl = imageData.imageUrl;
+                                    console.log(`  🖼️ Found Image URL (hovered): ${result.imageUrl.substring(0, 60)}...`);
+                                }
                                 
-                                // Prioritize tpc.googlesyndication.com/simgad/ URLs
-                                if (imgSrc.includes('tpc.googlesyndication.com/simgad/') || 
-                                    imgSrc.includes('googlesyndication.com/simgad/')) {
-                                    if (!foundSimgadImage) {
-                                        foundSimgadImage = imgSrc;
+                                // Also extract headline if app name not found
+                                if (imageData.headline && result.appName === 'NOT_FOUND') {
+                                    const cleanedHeadline = cleanName(imageData.headline);
+                                    if (cleanedHeadline !== 'NOT_FOUND') {
+                                        result.appName = cleanedHeadline;
+                                        console.log(`  ✓ Found app name from headline (hovered): ${result.appName}`);
                                     }
                                 }
-                                
-                                // Store first visible image as fallback
-                                if (!foundImage && imgSrc.match(/\.(jpg|jpeg|png|gif|webp)/i)) {
-                                    foundImage = imgSrc;
-                                }
                             }
-                        } catch (e) { }
+                        }
                     }
-                    
-                    // Return simgad image if found, otherwise first visible image
-                    return foundSimgadImage || foundImage || null;
-                });
-                if (mainImageUrl) {
-                    result.imageUrl = mainImageUrl;
-                    console.log(`  🖼️ Found Image URL (main page): ${mainImageUrl.substring(0, 60)}...`);
+                } catch (e) {
+                    console.log(`  ⚠️ Image hover/extraction failed: ${e.message}`);
                 }
             }
 
