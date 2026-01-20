@@ -684,14 +684,18 @@ async function extractTextAdData(page, config) {
                         data.appHeadline = headlineText;
                     }
                     
-                    // If we didn't get app name from span, try getting it from the headline or nearby text
-                    if (!data.appName && headlineText) {
-                        // Sometimes the app name is in the headline, separated by | or -
+                    // Don't use headline as app name - they should be separate
+                    // Only use headline parts if we really can't find an app name elsewhere
+                    // and the headline looks like it might contain an app name (has separator)
+                    if (!data.appName && headlineText && headlineText.includes('|')) {
+                        // Only if headline has separator, try first part
                         const parts = headlineText.split(/[|\-–—]/).map(p => p.trim()).filter(p => p.length > 3);
-                        if (parts.length > 0) {
-                            data.appName = parts[0]; // First part is usually the app name
+                        if (parts.length > 1 && parts[0].length > 5) {
+                            data.appName = parts[0]; // First part might be app name
+                            data.appHeadline = parts.slice(1).join(' | '); // Rest is headline
                         }
                     }
+                    // If still no app name, don't use headline - leave it as null
                     
                     // Extract Package Name from JavaScript data in this frame
                     const pageContent = document.documentElement.innerHTML;
@@ -724,48 +728,109 @@ async function extractTextAdData(page, config) {
                 console.log(`  🔍 Extracted from ${ctx.name}: appName="${extractedData.appName}", headline="${extractedData.appHeadline}", package="${extractedData.packageName}"`);
                 
                 // Update result with extracted data
-                if (extractedData.appName && extractedData.appName.trim()) {
-                    result.appName = extractedData.appName.trim();
+                const appName = extractedData.appName ? extractedData.appName.trim() : null;
+                const headline = extractedData.appHeadline ? extractedData.appHeadline.trim() : null;
+                
+                // Set app name if we found one (even if same as headline - some ads are like that)
+                if (appName) {
+                    result.appName = appName;
                 }
-                if (extractedData.appHeadline && extractedData.appHeadline.trim()) {
-                    result.appSubtitle = extractedData.appHeadline.trim();
+                // Set headline/subtitle
+                if (headline) {
+                    result.appSubtitle = headline;
                 }
+                
                 if (extractedData.packageName && extractedData.packageName.trim()) {
                     result.storeLink = `https://play.google.com/store/apps/details?id=${extractedData.packageName.trim()}`;
                 }
                 
-                // If we got app name or headline but no package, try searching main page HTML
+                // If we got app name or headline but no package, try searching ALL frames HTML
                 if ((result.appName !== 'NOT_FOUND' || result.appSubtitle !== 'NOT_FOUND') && result.storeLink === 'NOT_FOUND') {
                     try {
-                        const mainPagePackage = await page.evaluate(() => {
-                            const pageContent = document.documentElement.innerHTML;
-                            const patterns = [
-                                /play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi,
-                                /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){3,})["']/gi
-                            ];
-                            
-                            for (const pattern of patterns) {
-                                const matches = pageContent.match(pattern);
-                                if (matches) {
-                                    for (const match of matches) {
-                                        let pkg = match.replace(/["']/g, '').replace(/^.*?id=([a-z0-9_.]+).*$/i, '$1').replace(/^.*?(com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+).*$/i, '$1');
-                                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
-                                            !pkg.includes('google') && !pkg.includes('android') &&
-                                            !pkg.includes('example') && pkg.length > 10) {
-                                            return pkg;
+                        // Search all frames for package name
+                        const frames = page.frames();
+                        let foundPackage = null;
+                        
+                        for (const frame of frames) {
+                            try {
+                                const framePackage = await frame.evaluate(() => {
+                                    const pageContent = document.documentElement.innerHTML;
+                                    
+                                    // Pattern 1: Direct Play Store links
+                                    const playStoreMatches = pageContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi);
+                                    if (playStoreMatches) {
+                                        for (const match of playStoreMatches) {
+                                            const pkg = match.match(/id=([a-z0-9_.]+)/i);
+                                            if (pkg && pkg[1] && pkg[1].startsWith('com.') && pkg[1].split('.').length >= 3 &&
+                                                !pkg[1].includes('google') && !pkg[1].includes('android') && pkg[1].length > 10) {
+                                                return pkg[1];
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Pattern 2: Package names in quotes or data attributes
+                                    const patterns = [
+                                        /data-asoch-meta="[^"]*?id=([a-z0-9_.]+)/i,
+                                        /appId\s*[:=]\s*['"](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)['"]/i,
+                                        /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){3,})["']/gi
+                                    ];
+                                    
+                                    for (const pattern of patterns) {
+                                        const matches = pageContent.match(pattern);
+                                        if (matches) {
+                                            for (const match of matches) {
+                                                let pkg = match.replace(/["']/g, '').replace(/^.*?id=([a-z0-9_.]+).*$/i, '$1').replace(/^.*?(com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+).*$/i, '$1');
+                                                if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                                                    !pkg.includes('google') && !pkg.includes('android') &&
+                                                    !pkg.includes('example') && pkg.length > 10) {
+                                                    return pkg;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    return null;
+                                });
+                                
+                                if (framePackage) {
+                                    foundPackage = framePackage;
+                                    console.log(`  ✅ Found package from ${frame.url().substring(0, 50)}: ${framePackage}`);
+                                    break;
+                                }
+                            } catch (e) {
+                                // Cross-origin frame, skip
+                                continue;
+                            }
+                        }
+                        
+                        // Also search main page
+                        if (!foundPackage) {
+                            const mainPagePackage = await page.evaluate(() => {
+                                const pageContent = document.documentElement.innerHTML;
+                                const playStoreMatches = pageContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi);
+                                if (playStoreMatches) {
+                                    for (const match of playStoreMatches) {
+                                        const pkg = match.match(/id=([a-z0-9_.]+)/i);
+                                        if (pkg && pkg[1] && pkg[1].startsWith('com.') && pkg[1].split('.').length >= 3 &&
+                                            !pkg[1].includes('google') && !pkg[1].includes('android') && pkg[1].length > 10) {
+                                            return pkg[1];
                                         }
                                     }
                                 }
+                                return null;
+                            });
+                            
+                            if (mainPagePackage) {
+                                foundPackage = mainPagePackage;
+                                console.log(`  ✅ Found package from main page: ${mainPagePackage}`);
                             }
-                            return null;
-                        });
+                        }
                         
-                        if (mainPagePackage) {
-                            result.storeLink = `https://play.google.com/store/apps/details?id=${mainPagePackage}`;
-                            console.log(`  ✅ Found package from main page: ${mainPagePackage}`);
+                        if (foundPackage) {
+                            result.storeLink = `https://play.google.com/store/apps/details?id=${foundPackage}`;
                         }
                     } catch (e) {
-                        // Ignore errors
+                        console.log(`  ⚠️ Package search error: ${e.message}`);
                     }
                 }
                 
@@ -838,14 +903,18 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         // Normalize whitespace
         cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
-        // Blacklist for app names (Global)
+        // Blacklist for app names (Global) - only reject if exact match or very short phrases
         const blacklistNames = [
             'ad details', 'google ads', 'transparency center', 'about this ad',
             'privacy policy', 'terms of service', 'install now', 'download',
             'play store', 'app store', 'advertisement', 'sponsored',
-            'open', 'get', 'visit', 'learn more', 'blocked'
+            'learn more', 'blocked'
         ];
-        if (blacklistNames.some(n => cleaned.toLowerCase() === n || cleaned.toLowerCase().includes(n))) return 'NOT_FOUND';
+        // Only reject if it's an exact match or a very short phrase (1-2 words)
+        const wordCount = cleaned.split(/\s+/).length;
+        if (wordCount <= 2 && blacklistNames.some(n => cleaned.toLowerCase() === n)) return 'NOT_FOUND';
+        // For longer phrases, only reject if it contains exact blacklist phrase
+        if (wordCount > 2 && blacklistNames.some(n => cleaned.toLowerCase().includes(n) && n.length > 5)) return 'NOT_FOUND';
 
         // Length check
         if (cleaned.length < 2 || cleaned.length > 80) return 'NOT_FOUND';
