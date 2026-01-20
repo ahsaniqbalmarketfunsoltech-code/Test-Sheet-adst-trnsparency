@@ -655,24 +655,71 @@ async function extractTextAdData(page, config) {
                     if (!container) container = targetElement.parentElement;
                     if (!container) container = document.body;
                     
-                    // Extract App Name from span elements NEAR the hovered element (within container)
+                    // Extract App Name - try multiple strategies
+                    // Strategy 1: Look for spans ABOVE the headline (app name is usually above headline)
+                    const headlineRect = targetElement.getBoundingClientRect();
                     const spanElements = container.querySelectorAll('span');
+                    let foundAppName = false;
+                    
                     for (const span of spanElements) {
                         const text = (span.innerText || span.textContent || '').trim();
-                        // More specific: should be substantial text, not buttons/links
-                        if (text && text.length > 5 && text.length < 150 && 
+                        const rect = span.getBoundingClientRect();
+                        
+                        // Check if span is above the headline and visible
+                        if (rect.top < headlineRect.top && rect.width > 0 && rect.height > 0 && 
+                            text && text.length > 3 && text.length < 150 &&
                             !text.toLowerCase().includes('install') &&
                             !text.toLowerCase().includes('download') &&
                             !text.toLowerCase().includes('get it') &&
-                            !text.toLowerCase().includes('play store')) {
-                            const rect = span.getBoundingClientRect();
-                            // Check if it's visible and in a reasonable position
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 0 && rect.left > 0) {
-                                // Prefer spans that are near the headline element
-                                const distance = Math.abs(rect.top - targetElement.getBoundingClientRect().top);
-                                if (distance < 200) { // Within 200px vertically
-                                    data.appName = text;
-                                    break;
+                            !text.toLowerCase().includes('play store') &&
+                            !text.toLowerCase().includes('advertisement')) {
+                            // Check if it's reasonably close (within 100px above)
+                            const distance = headlineRect.top - rect.bottom;
+                            if (distance > 0 && distance < 100) {
+                                data.appName = text;
+                                foundAppName = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Strategy 2: Look for parent element's first child text (app name might be in parent)
+                    if (!foundAppName && targetElement.parentElement) {
+                        const parent = targetElement.parentElement;
+                        const parentText = (parent.innerText || parent.textContent || '').trim();
+                        // If parent has multiple text nodes, first might be app name
+                        const children = Array.from(parent.children);
+                        for (const child of children) {
+                            if (child === targetElement) break; // Stop at headline element
+                            const childText = (child.innerText || child.textContent || '').trim();
+                            if (childText && childText.length > 3 && childText.length < 150 &&
+                                !childText.toLowerCase().includes('install') &&
+                                !childText.toLowerCase().includes('download')) {
+                                data.appName = childText;
+                                foundAppName = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Strategy 3: Look for spans near headline (within container, any position)
+                    if (!foundAppName) {
+                        for (const span of spanElements) {
+                            const text = (span.innerText || span.textContent || '').trim();
+                            if (text && text.length > 5 && text.length < 150 && 
+                                text !== headlineText && // Don't use headline as app name
+                                !text.toLowerCase().includes('install') &&
+                                !text.toLowerCase().includes('download') &&
+                                !text.toLowerCase().includes('get it') &&
+                                !text.toLowerCase().includes('play store')) {
+                                const rect = span.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0 && rect.top > 0 && rect.left > 0) {
+                                    const distance = Math.abs(rect.top - headlineRect.top);
+                                    if (distance < 150) { // Within 150px vertically
+                                        data.appName = text;
+                                        foundAppName = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -697,27 +744,71 @@ async function extractTextAdData(page, config) {
                     }
                     // If still no app name, don't use headline - leave it as null
                     
-                    // Extract Package Name from JavaScript data in this frame
-                    const pageContent = document.documentElement.innerHTML;
-                    const patterns = [
-                        /AF_dataServiceRequests[^]]*["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)["']/i,
-                        /appId\s*[:=]\s*['"](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)['"]/i,
-                        /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){3,})["']/gi
-                    ];
+                    // Extract Package Name - scope to current ad container to avoid wrong packages
+                    // First, try to find package in the ad container's HTML (most reliable)
+                    let containerHTML = container.innerHTML;
+                    if (!containerHTML || containerHTML.length < 100) {
+                        // If container HTML is too small, use frame HTML but be more selective
+                        containerHTML = document.documentElement.innerHTML;
+                    }
                     
-                    for (const pattern of patterns) {
-                        const matches = pageContent.match(pattern);
-                        if (matches) {
-                            for (const match of matches) {
-                                const pkg = match.replace(/["']/g, '').replace(/^.*?(com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+).*$/i, '$1');
-                                if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
-                                    !pkg.includes('google') && !pkg.includes('android') &&
-                                    !pkg.includes('example') && pkg.length > 10) {
-                                    data.packageName = pkg;
-                                    break;
+                    // Pattern 1: Look for Play Store links in container (most reliable)
+                    const playStoreMatch = containerHTML.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/i);
+                    if (playStoreMatch && playStoreMatch[1]) {
+                        const pkg = playStoreMatch[1];
+                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                            !pkg.includes('google') && !pkg.includes('android') &&
+                            pkg.length > 10) {
+                            data.packageName = pkg;
+                        }
+                    }
+                    
+                    // Pattern 2: Look for data-asoch-meta with package (scoped to container)
+                    if (!data.packageName) {
+                        const metaElements = container.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]');
+                        for (const meta of metaElements) {
+                            const metaValue = meta.getAttribute('data-asoch-meta') || '';
+                            if (metaValue.includes('play.google.com')) {
+                                const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
+                                if (match && match[1]) {
+                                    const pkg = match[1];
+                                    if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                                        !pkg.includes('google') && !pkg.includes('android') &&
+                                        pkg.length > 10) {
+                                        data.packageName = pkg;
+                                        break;
+                                    }
                                 }
                             }
-                            if (data.packageName) break;
+                        }
+                    }
+                    
+                    // Pattern 3: Look for appId in JavaScript near the container (last resort)
+                    if (!data.packageName) {
+                        // Try to find script tags near the container
+                        const scripts = document.querySelectorAll('script');
+                        for (const script of scripts) {
+                            const scriptText = script.textContent || script.innerHTML || '';
+                            // Look for appId patterns near ad-related keywords
+                            if (scriptText.includes('appId') || scriptText.includes('play.google.com')) {
+                                const patterns = [
+                                    /appId\s*[:=]\s*['"](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)['"]/i,
+                                    /play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/i
+                                ];
+                                for (const pattern of patterns) {
+                                    const match = scriptText.match(pattern);
+                                    if (match && match[1]) {
+                                        const pkg = match[1];
+                                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                                            !pkg.includes('google') && !pkg.includes('android') &&
+                                            !pkg.includes('example') && pkg.length > 10) {
+                                            data.packageName = pkg;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (data.packageName) break;
+                            }
                         }
                     }
                     
@@ -745,61 +836,90 @@ async function extractTextAdData(page, config) {
                 }
                 
                 // If we got app name or headline but no package, try searching ALL frames HTML
+                // BUT prioritize the frame where we found the ad element
                 if ((result.appName !== 'NOT_FOUND' || result.appSubtitle !== 'NOT_FOUND') && result.storeLink === 'NOT_FOUND') {
                     try {
-                        // Search all frames for package name
+                        // Search all frames for package name, but prioritize current frame
                         const frames = page.frames();
                         let foundPackage = null;
+                        const commonWrongPackages = ['com.audio.mp3player.video.musicplayer']; // Known wrong packages to avoid
                         
-                        for (const frame of frames) {
+                        // First, try the frame where we found the ad (most reliable)
+                        if (ctx.frame) {
                             try {
-                                const framePackage = await frame.evaluate(() => {
-                                    const pageContent = document.documentElement.innerHTML;
-                                    
-                                    // Pattern 1: Direct Play Store links
-                                    const playStoreMatches = pageContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi);
-                                    if (playStoreMatches) {
-                                        for (const match of playStoreMatches) {
-                                            const pkg = match.match(/id=([a-z0-9_.]+)/i);
-                                            if (pkg && pkg[1] && pkg[1].startsWith('com.') && pkg[1].split('.').length >= 3 &&
-                                                !pkg[1].includes('google') && !pkg[1].includes('android') && pkg[1].length > 10) {
-                                                return pkg[1];
+                                const currentFramePackage = await ctx.frame.evaluate(() => {
+                                    // Look for Play Store links in data-asoch-meta (most reliable)
+                                    const metaElements = document.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]');
+                                    for (const meta of metaElements) {
+                                        const metaValue = meta.getAttribute('data-asoch-meta') || '';
+                                        if (metaValue.includes('play.google.com')) {
+                                            const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
+                                            if (match && match[1]) {
+                                                return match[1];
                                             }
                                         }
                                     }
                                     
-                                    // Pattern 2: Package names in quotes or data attributes
-                                    const patterns = [
-                                        /data-asoch-meta="[^"]*?id=([a-z0-9_.]+)/i,
-                                        /appId\s*[:=]\s*['"](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)['"]/i,
-                                        /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){3,})["']/gi
-                                    ];
-                                    
-                                    for (const pattern of patterns) {
-                                        const matches = pageContent.match(pattern);
-                                        if (matches) {
-                                            for (const match of matches) {
-                                                let pkg = match.replace(/["']/g, '').replace(/^.*?id=([a-z0-9_.]+).*$/i, '$1').replace(/^.*?(com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+).*$/i, '$1');
-                                                if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
-                                                    !pkg.includes('google') && !pkg.includes('android') &&
-                                                    !pkg.includes('example') && pkg.length > 10) {
-                                                    return pkg;
-                                                }
-                                            }
-                                        }
+                                    // Fallback: look for Play Store links in HTML
+                                    const pageContent = document.documentElement.innerHTML;
+                                    const playStoreMatches = pageContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi);
+                                    if (playStoreMatches && playStoreMatches.length > 0) {
+                                        const pkg = playStoreMatches[0].match(/id=([a-z0-9_.]+)/i);
+                                        if (pkg && pkg[1]) return pkg[1];
                                     }
                                     
                                     return null;
                                 });
                                 
-                                if (framePackage) {
-                                    foundPackage = framePackage;
-                                    console.log(`  ✅ Found package from ${frame.url().substring(0, 50)}: ${framePackage}`);
-                                    break;
+                                if (currentFramePackage && !commonWrongPackages.includes(currentFramePackage)) {
+                                    foundPackage = currentFramePackage;
+                                    console.log(`  ✅ Found package from current frame (${ctx.name}): ${currentFramePackage}`);
                                 }
                             } catch (e) {
-                                // Cross-origin frame, skip
-                                continue;
+                                // Cross-origin, continue
+                            }
+                        }
+                        
+                        // If not found in current frame, search other frames
+                        if (!foundPackage) {
+                            for (const frame of frames) {
+                                // Skip the frame we already checked
+                                if (ctx.frame && frame === ctx.frame) continue;
+                                
+                                try {
+                                    const framePackage = await frame.evaluate(() => {
+                                        const pageContent = document.documentElement.innerHTML;
+                                        
+                                        // Pattern 1: Direct Play Store links (most reliable)
+                                        const playStoreMatches = pageContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi);
+                                        if (playStoreMatches && playStoreMatches.length > 0) {
+                                            // Use first match
+                                            const pkg = playStoreMatches[0].match(/id=([a-z0-9_.]+)/i);
+                                            if (pkg && pkg[1]) return pkg[1];
+                                        }
+                                        
+                                        // Pattern 2: data-asoch-meta (very reliable)
+                                        const metaElements = document.querySelectorAll('meta[data-asoch-meta], *[data-asoch-meta]');
+                                        for (const meta of metaElements) {
+                                            const metaValue = meta.getAttribute('data-asoch-meta') || '';
+                                            if (metaValue.includes('play.google.com')) {
+                                                const match = metaValue.match(/id=([a-zA-Z0-9._]+)/);
+                                                if (match && match[1]) return match[1];
+                                            }
+                                        }
+                                        
+                                        return null;
+                                    });
+                                    
+                                    if (framePackage && !commonWrongPackages.includes(framePackage)) {
+                                        foundPackage = framePackage;
+                                        console.log(`  ✅ Found package from ${frame.url().substring(0, 50)}: ${framePackage}`);
+                                        break;
+                                    }
+                                } catch (e) {
+                                    // Cross-origin frame, skip
+                                    continue;
+                                }
                             }
                         }
                         
