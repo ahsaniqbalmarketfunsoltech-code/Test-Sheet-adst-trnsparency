@@ -135,13 +135,15 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 }
 
                 // Process all other rows
-                const needsMetadata = !storeLink || !appName || !appSubtitle || !imageUrl;
+                // Check if values are empty or NOT_FOUND (treat NOT_FOUND as needing retry)
+                const isEmpty = (val) => !val || val === 'NOT_FOUND' || val === 'SKIP';
+                const needsMetadata = isEmpty(storeLink) || isEmpty(appName) || isEmpty(appSubtitle) || isEmpty(imageUrl);
                 toProcess.push({
                     url,
                     rowIndex: actualRowIndex,
                     needsMetadata,
                     needsVideoId: true,
-                    existingStoreLink: storeLink
+                    existingStoreLink: (!storeLink || storeLink === 'NOT_FOUND') ? '' : storeLink
                 });
             }
 
@@ -975,15 +977,23 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     const frames = page.frames();
                     console.log(`  📄 Found ${frames.length} frames to search`);
 
+                    let accessibleFrames = 0;
                     for (const frame of frames) {
                         try {
+                            const frameUrl = frame.url();
                             const frameContent = await frame.content();
                             allContent += frameContent;
+                            accessibleFrames++;
+                            // Debug: check if this frame has the meta tag
+                            if (frameContent.includes('data-asoch-meta')) {
+                                console.log(`  ✅ Frame has data-asoch-meta: ${frameUrl.substring(0, 50)}...`);
+                            }
                         } catch (e) {
-                            // Some frames may be inaccessible, skip them
+                            // Log which frames are inaccessible
+                            console.log(`  ⚠️ Cannot access frame: ${frame.url().substring(0, 50)}...`);
                         }
                     }
-
+                    console.log(`  📄 Accessible frames: ${accessibleFrames}/${frames.length}`);
                     console.log(`  📄 Total HTML content length: ${allContent.length} chars`);
 
                     // Check if data-asoch-meta exists
