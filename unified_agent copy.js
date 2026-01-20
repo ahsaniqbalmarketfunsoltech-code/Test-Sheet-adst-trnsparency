@@ -8,8 +8,7 @@
  *   Column B: Ads URL
  *   Column C: App Link
  *   Column D: App Name
- *   Column E: Video ID
- *   Column F: App Subtitle/Tagline
+ *   Column F: App Subtitle/Tagline (cS4Vcb-vnv8ic)
  *   Column G: Image URL
  *   Column M: Timestamp
  */
@@ -31,7 +30,6 @@ const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 10000; // Row
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 4;
-const POST_CLICK_WAIT = 6000;
 const RETRY_WAIT_MULTIPLIER = 1.25;
 const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
 const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
@@ -102,7 +100,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     while (hasMoreData) {
         try {
             const endRow = startRow + batchSize - 1;
-            const range = `${SHEET_NAME}!A${startRow + 1}:G${endRow + 1}`; // +1 because Google Sheets is 1-indexed
+            const range = `${SHEET_NAME}!A${startRow + 1}:G${endRow + 1}`; // A-G columns
 
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
@@ -122,7 +120,6 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 const url = row[1]?.trim() || '';
                 const storeLink = row[2]?.trim() || '';
                 const appName = row[3]?.trim() || '';
-                const videoId = row[4]?.trim() || '';
                 const appSubtitle = row[5]?.trim() || '';
                 const imageUrl = row[6]?.trim() || '';
 
@@ -140,7 +137,6 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                     url,
                     rowIndex: actualRowIndex,
                     needsMetadata,
-                    needsVideoId: true,
                     existingStoreLink: storeLink
                 });
             }
@@ -172,7 +168,7 @@ async function batchWriteToSheet(sheets, updates) {
     if (updates.length === 0) return;
 
     const data = [];
-    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId, appSubtitle, imageUrl }) => {
+    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, appSubtitle, imageUrl }) => {
         const rowNum = rowIndex + 1;
         if (advertiserName && advertiserName !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
@@ -182,9 +178,6 @@ async function batchWriteToSheet(sheets, updates) {
         }
         if (appName && appName !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
-        }
-        if (videoId && videoId !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
         }
         // Write app subtitle/tagline to Column F
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
@@ -214,19 +207,17 @@ async function batchWriteToSheet(sheets, updates) {
 
 // ============================================
 // UNIFIED EXTRACTION - ONE VISIT PER URL
-// Both metadata + video ID extracted on same page
+// Metadata extracted on same page
 // ============================================
-async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink, attempt = 1) {
+async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLink, attempt = 1) {
     const page = await browser.newPage();
     let result = {
         advertiserName: 'SKIP',
         appName: needsMetadata ? 'NOT_FOUND' : 'SKIP',
         storeLink: needsMetadata ? 'NOT_FOUND' : 'SKIP',
-        videoId: 'SKIP',
         appSubtitle: needsMetadata ? 'NOT_FOUND' : 'SKIP',
         imageUrl: needsMetadata ? 'NOT_FOUND' : 'SKIP'
     };
-    let capturedVideoId = null;
 
     // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
@@ -340,35 +331,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         };
     }, screenWidth, screenHeight);
 
-    // VIDEO ID CAPTURE + SPEED OPTIMIZATION
+    // SPEED OPTIMIZATION - Block unnecessary resources
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
-
-        // Capture video ID from googlevideo.com requests
-        if (requestUrl.includes('googlevideo.com/videoplayback')) {
-            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-            const id = urlParams.get('id');
-            if (id && /^[a-f0-9]{18}$|^[a-f0-9]{16}$/.test(id)) {
-                capturedVideoId = id;
-            }
-        }
-        // Capture from YouTube embeds
-        else if (requestUrl.includes('youtube.com/embed/')) {
-            const match = requestUrl.match(/\/embed\/([^?]+)/);
-            if (match && match[1]) {
-                capturedVideoId = match[1];
-            }
-        }
-        // Capture from YouTube get_video_info or watch
-        else if (requestUrl.includes('youtube.com/watch') || requestUrl.includes('youtube.com/get_video_info')) {
-            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-            const v = urlParams.get('video_id') || urlParams.get('v');
-            if (v && v.length >= 11) {
-                capturedVideoId = v;
-            }
-        }
-
         const resourceType = request.resourceType();
         // Abort more resource types for speed: image, font, stylesheet (optional but fast), and tracking
         const blockedTypes = ['image', 'font', 'other', 'stylesheet'];
@@ -431,7 +397,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             content.toLowerCase().includes('verify you are human')) {
             console.error('  ⚠️ BLOCKED');
             await page.close();
-            return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
+            return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', appSubtitle: 'BLOCKED', imageUrl: 'BLOCKED' };
         }
 
         // Wait for dynamic elements to settle (increased for large datasets)
@@ -576,31 +542,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         }
 
                         // =====================================================
-                        // EXTRACT APP SUBTITLE/TAGLINE
+                        // EXTRACT APP SUBTITLE/TAGLINE - Only cS4Vcb-vnv8ic class
                         // =====================================================
-                        const subtitleSelectors = [
-                            '.ns-yp8c1-e-18.headline',
-                            '[class*="yp8c1"][class*="headline"]',
-                            '.headline',
-                            '.c54Vcb-vmv8lc',
-                            '[class*="vmv8lc"]',
-                            '[class*="tagline"]',
-                            '[class*="subtitle"]'
-                        ];
-                        for (const sel of subtitleSelectors) {
-                            try {
-                                const el = root.querySelector(sel);
-                                if (el) {
-                                    const text = (el.innerText || el.textContent || '').trim();
-                                    if (text && text.length >= 3 && text.length <= 150) {
-                                        if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
-                                            data.appSubtitle = text;
-                                            break;
-                                        }
-                                    }
-                                }
-                            } catch (e) { }
-                        }
+                        // Note: Subtitle extraction will be done after hovering (see below)
 
                         // =====================================================
                         // EXTRACT IMAGE URL (especially for Image Ads)
@@ -755,11 +699,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         return data;
                     }, blacklistName);
 
-                    // Extract app subtitle if found
-                    if (frameData.appSubtitle && result.appSubtitle === 'NOT_FOUND') {
-                        result.appSubtitle = frameData.appSubtitle;
-                        console.log(`  ✓ Found subtitle: ${result.appSubtitle.substring(0, 50)}...`);
-                    }
+                    // Subtitle extraction will be done separately with hover
 
                     // Extract Image URL if found
                     if (frameData.imageUrl && result.imageUrl === 'NOT_FOUND') {
@@ -795,139 +735,175 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     }
                 } catch (e) { }
             }
-        }
 
-        // =====================================================
-        // PHASE 2: VIDEO ID EXTRACTION
-        // Only extract for Play Store video ads
-        // Text ads and Apple Store ads already skipped earlier
-        // =====================================================
-        const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
-        const isPlayStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('play.google.com');
-        const isAppleStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('apps.apple.com');
+            // =====================================================
+            // EXTRACT SUBTITLE - Only cS4Vcb-vnv8ic class with hover
+            // =====================================================
+            if (needsMetadata && result.appSubtitle === 'NOT_FOUND') {
+                console.log(`  📝 Extracting subtitle (cS4Vcb-vnv8ic)...`);
+                
+                try {
+                    const client = await page.target().createCDPSession();
+                    
+                    // First, try extracting from iframes (most common location for ad creatives)
+                    const frames = page.frames();
+                    for (const frame of frames) {
+                        try {
+                            // Find subtitle elements in this frame
+                            const subtitleInfo = await frame.evaluate(() => {
+                                const root = document.querySelector('#portrait-landscape-phone') || document.body;
+                                const subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
+                                const elements = [];
+                                
+                                for (const el of subtitleEls) {
+                                    const rect = el.getBoundingClientRect();
+                                    if (rect.width > 0 && rect.height > 0) {
+                                        const text = (el.innerText || el.textContent || '').trim();
+                                        if (text && text.length >= 3 && text.length <= 150) {
+                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
+                                                // Check if this is in the ad creative area (not header/footer)
+                                                const bodyRect = document.body.getBoundingClientRect();
+                                                // Element should be in the visible/middle area
+                                                if (rect.top > bodyRect.top + 50 && rect.bottom < bodyRect.bottom - 50) {
+                                                    elements.push({
+                                                        x: rect.left + rect.width / 2,
+                                                        y: rect.top + rect.height / 2,
+                                                        text: text
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                return elements;
+                            });
 
-        // Extract video ID if needed (for all video ads)
-        if (needsVideoId || needsMetadata) {
-            console.log(`  🎬 Extracting Video ID...`);
+                            // Hover on each subtitle element found in this frame
+                            if (subtitleInfo && subtitleInfo.length > 0) {
+                                for (const subtitleEl of subtitleInfo) {
+                                    try {
+                                        // Get iframe position to calculate absolute coordinates
+                                        const iframe = await frame.frameElement();
+                                        if (iframe) {
+                                            const iframeRect = await iframe.boundingBox();
+                                            if (iframeRect) {
+                                                const absoluteX = iframeRect.x + subtitleEl.x;
+                                                const absoluteY = iframeRect.y + subtitleEl.y;
+                                                
+                                                // Hover on the subtitle element
+                                                await client.send('Input.dispatchMouseEvent', {
+                                                    type: 'mouseMoved',
+                                                    x: absoluteX,
+                                                    y: absoluteY
+                                                });
+                                                await sleep(600 + Math.random() * 400); // Wait for hover effects
+                                                
+                                                // After hover, extract the text from the subtitle element
+                                                // Hovering helps reveal the correct element, so we extract all and pick the best one
+                                                const hoveredText = await frame.evaluate(() => {
+                                                    const root = document.querySelector('#portrait-landscape-phone') || document.body;
+                                                    const subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
+                                                    
+                                                    // Return first valid subtitle in ad creative area (after hover, this should be the correct one)
+                                                    for (const el of subtitleEls) {
+                                                        const rect = el.getBoundingClientRect();
+                                                        if (rect.width > 0 && rect.height > 0) {
+                                                            const bodyRect = document.body.getBoundingClientRect();
+                                                            // Element should be in the visible/middle area (ad creative)
+                                                            if (rect.top > bodyRect.top + 50 && rect.bottom < bodyRect.bottom - 50) {
+                                                                const text = (el.innerText || el.textContent || '').trim();
+                                                                if (text && text.length >= 3 && text.length <= 150) {
+                                                                    if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
+                                                                        return text;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    return null;
+                                                });
 
-            // Find and click play button (EXACT from agent.js)
-            const playButtonInfo = await page.evaluate(() => {
-                const results = { found: false, x: 0, y: 0 };
-                const searchForPlayButton = (root) => {
-                    const playSelectors = ['.play-button', '.ytp-large-play-button', '.ytp-play-button', 'video', '[aria-label*="Play" i]'];
-                    for (const sel of playSelectors) {
-                        const btn = root.querySelector(sel);
-                        if (btn) {
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width > 5 && rect.height > 5) {
-                                results.found = true;
-                                results.x = rect.left + rect.width / 2;
-                                results.y = rect.top + rect.height / 2;
-                                return true;
+                                                if (hoveredText) {
+                                                    result.appSubtitle = hoveredText;
+                                                    console.log(`  ✓ Found subtitle: ${result.appSubtitle.substring(0, 50)}...`);
+                                                    break; // Found it, stop searching
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        // Continue to next element
+                                    }
+                                }
+                                
+                                if (result.appSubtitle !== 'NOT_FOUND') break; // Found subtitle, stop checking frames
+                            }
+                        } catch (e) {
+                            // Cross-origin iframe or error, skip
+                        }
+                    }
+
+                    // Fallback: try main page if not found in iframes
+                    if (result.appSubtitle === 'NOT_FOUND') {
+                        const subtitleElements = await page.evaluate(() => {
+                            const elements = [];
+                            const allElements = document.querySelectorAll('.cS4Vcb-vnv8ic');
+                            allElements.forEach(el => {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0) {
+                                    const text = (el.innerText || el.textContent || '').trim();
+                                    if (text && text.length >= 3 && text.length <= 150) {
+                                        if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
+                                            const bodyRect = document.body.getBoundingClientRect();
+                                            if (rect.top > bodyRect.top + 100 && rect.bottom < bodyRect.bottom - 100) {
+                                                elements.push({
+                                                    x: rect.left + rect.width / 2,
+                                                    y: rect.top + rect.height / 2,
+                                                    text: text
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                            return elements;
+                        });
+
+                        // Hover on main page subtitle elements
+                        for (const subtitleEl of subtitleElements) {
+                            try {
+                                await client.send('Input.dispatchMouseEvent', {
+                                    type: 'mouseMoved',
+                                    x: subtitleEl.x,
+                                    y: subtitleEl.y
+                                });
+                                await sleep(600 + Math.random() * 400);
+                                
+                                const hoveredText = await page.evaluate((x, y) => {
+                                    const element = document.elementFromPoint(x, y);
+                                    if (element && element.classList.contains('cS4Vcb-vnv8ic')) {
+                                        const text = (element.innerText || element.textContent || '').trim();
+                                        if (text && text.length >= 3 && text.length <= 150) {
+                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
+                                                return text;
+                                            }
+                                        }
+                                    }
+                                    return null;
+                                }, subtitleEl.x, subtitleEl.y);
+
+                                if (hoveredText) {
+                                    result.appSubtitle = hoveredText;
+                                    console.log(`  ✓ Found subtitle on main page: ${result.appSubtitle.substring(0, 50)}...`);
+                                    break;
+                                }
+                            } catch (e) {
+                                // Continue to next element
                             }
                         }
                     }
-                    const elements = root.querySelectorAll('*');
-                    for (const el of elements) {
-                        if (el.shadowRoot) {
-                            if (searchForPlayButton(el.shadowRoot)) return true;
-                        }
-                    }
-                    return false;
-                };
-
-                const iframes = document.querySelectorAll('iframe');
-                for (let i = 0; i < iframes.length; i++) {
-                    try {
-                        const iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow?.document;
-                        if (iframeDoc) {
-                            const found = searchForPlayButton(iframeDoc);
-                            if (found) break;
-                        }
-                    } catch (e) { }
-                }
-                if (!results.found) searchForPlayButton(document);
-
-                // Fallback: click center of visible iframe
-                if (!results.found) {
-                    for (const iframe of iframes) {
-                        const rect = iframe.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            results.found = true;
-                            results.x = rect.left + rect.width / 2;
-                            results.y = rect.top + rect.height / 2;
-                            break;
-                        }
-                    }
-                }
-                return results;
-            });
-
-            if (playButtonInfo.found) {
-                try {
-                    const client = await page.target().createCDPSession();
-
-                    // More human-like mouse movement: gradual approach to button
-                    const startX = Math.random() * viewport.width;
-                    const startY = Math.random() * viewport.height;
-                    const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
-
-                    for (let i = 0; i <= steps; i++) {
-                        const progress = i / steps;
-                        const currentX = startX + (playButtonInfo.x - startX) * progress;
-                        const currentY = startY + (playButtonInfo.y - startY) * progress;
-                        await client.send('Input.dispatchMouseEvent', {
-                            type: 'mouseMoved',
-                            x: currentX,
-                            y: currentY
-                        });
-                        await sleep(50 + Math.random() * 50); // Variable speed
-                    }
-
-                    // Hover briefly before clicking (more human-like)
-                    await sleep(150 + Math.random() * 100);
-
-                    // Click with slight randomness in position
-                    const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
-                    const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
-
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mousePressed',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-                    await sleep(80 + Math.random() * 40);
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mouseReleased',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-
-                    // Wait for video to load (poll for capturedVideoId)
-                    const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
-                    const startTime = Date.now();
-                    while (Date.now() - startTime < waitTime && !capturedVideoId) {
-                        await sleep(300); // Faster polling
-                    }
-
-                    if (capturedVideoId) {
-                        result.videoId = capturedVideoId;
-                        console.log(`  ✓ Video ID: ${capturedVideoId}`);
-                    } else {
-                        result.videoId = 'NOT_FOUND';
-                        console.log(`  ⚠️ No video ID captured`);
-                    }
                 } catch (e) {
-                    console.log(`  ⚠️ Click failed: ${e.message}`);
-                    result.videoId = 'NOT_FOUND';
+                    console.log(`  ⚠️ Subtitle extraction error: ${e.message}`);
                 }
-            } else {
-                result.videoId = 'NOT_FOUND';
-                console.log(`  ⚠️ No play button found`);
             }
         }
 
@@ -936,7 +912,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     } catch (err) {
         console.error(`  ❌ Error: ${err.message}`);
         await page.close();
-        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', videoId: 'ERROR' };
+        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', appSubtitle: 'ERROR', imageUrl: 'ERROR' };
     }
 }
 
@@ -948,48 +924,31 @@ async function extractWithRetry(item, browser) {
             item.url,
             browser,
             item.needsMetadata,
-            item.needsVideoId,
             item.existingStoreLink,
             attempt
         );
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
-        // If all fields are SKIP (text ad or Apple Store ad), return immediately - no retries needed
-        if (data.storeLink === 'SKIP' && data.appName === 'SKIP' && data.videoId === 'SKIP') {
+        // If all fields are SKIP (text ad), return immediately - no retries needed
+        if (data.storeLink === 'SKIP' && data.appName === 'SKIP') {
             return data;
         }
 
-        // Determine if we have a valid store link (either from before or just found)
-        const currentStoreLink = (data.storeLink && data.storeLink !== 'SKIP' && data.storeLink !== 'NOT_FOUND')
-            ? data.storeLink
-            : item.existingStoreLink;
-
-        const isPlayStore = currentStoreLink && currentStoreLink.includes('play.google.com');
-        const isAppleStore = currentStoreLink && currentStoreLink.includes('apps.apple.com');
-
-        // Success criteria:
-        // 1. If we needed metadata, did we find it? (at least one of appName or storeLink)
+        // Success criteria: If we needed metadata, did we find it? (at least one of appName or storeLink)
         const metadataSuccess = !item.needsMetadata || (data.storeLink !== 'NOT_FOUND' || data.appName !== 'NOT_FOUND');
 
-        // 2. Video ID success (SPEED OPTIMIZED):
-        // - Apple Store: always success (SKIP is fine, no retries needed)
-        // - Text ad: always success (SKIP is fine, no retries needed)
-        // - Play Store video ads: need actual video ID (NOT_FOUND = retry, SKIP = success for text ads)
-        // - Non-Play Store: always success (no video expected)
-        const videoSuccess = isAppleStore || !isPlayStore || data.videoId === 'SKIP' || (data.videoId !== 'NOT_FOUND' && data.videoId !== null);
-
-        // We only return if BOTH are successful
-        if (metadataSuccess && videoSuccess) {
+        // We return if metadata is successful
+        if (metadataSuccess) {
             return data;
         } else {
-            console.log(`  ⚠️ Attempt ${attempt} partial success: Metadata=${metadataSuccess}, Video=${videoSuccess}. Retrying...`);
+            console.log(`  ⚠️ Attempt ${attempt} partial success: Metadata=${metadataSuccess}. Retrying...`);
         }
 
         await randomDelay(2000, 4000);
     }
     // If we're here, we exhausted retries. Return whatever we have.
-    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
+    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
 }
 
 // ============================================
@@ -998,7 +957,7 @@ async function extractWithRetry(item, browser) {
 (async () => {
     console.log(`🤖 Starting UNIFIED Google Ads Agent...\n`);
     console.log(`📋 Sheet: ${SHEET_NAME}`);
-    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Video ID, F=Subtitle, G=Image URL\n`);
+    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, F=Subtitle (cS4Vcb-vnv8ic), G=Image URL\n`);
 
     const sessionStartTime = Date.now();
     const MAX_RUNTIME = 330 * 60 * 1000;
@@ -1012,10 +971,8 @@ async function extractWithRetry(item, browser) {
     }
 
     const needsMeta = toProcess.filter(x => x.needsMetadata).length;
-    const needsVideo = toProcess.filter(x => x.needsVideoId).length;
     console.log(`📊 Found ${toProcess.length} rows to process:`);
-    console.log(`   - ${needsMeta} need metadata`);
-    console.log(`   - ${needsVideo} need video ID\n`);
+    console.log(`   - ${needsMeta} need metadata\n`);
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
@@ -1094,14 +1051,13 @@ async function extractWithRetry(item, browser) {
                         advertiserName: data.advertiserName,
                         storeLink: data.storeLink,
                         appName: data.appName,
-                        videoId: data.videoId,
                         appSubtitle: data.appSubtitle,
                         imageUrl: data.imageUrl
                     };
                 }));
 
                 results.forEach(r => {
-                    console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
+                    console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Subtitle=${r.appSubtitle?.substring(0, 30) || 'NOT_FOUND'}...`);
                 });
 
                 // Separate successful results from blocked ones
