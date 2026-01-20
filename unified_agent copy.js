@@ -27,15 +27,15 @@ const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Test data'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 10000; // Rows to load per batch
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 7; // Increased for speed
 const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 4;
-const RETRY_WAIT_MULTIPLIER = 1.25;
-const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
-const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
+const MAX_RETRIES = 3; // Reduced retries for speed
+const RETRY_WAIT_MULTIPLIER = 1.2; // Slightly reduced
+const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 500; // Faster staggered starts
+const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 1500; // Faster staggered starts
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Balanced: faster but safe
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Balanced: faster but safe
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 3000; // Faster batch processing
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 6000; // Faster batch processing
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -404,8 +404,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', appSubtitle: 'BLOCKED', imageUrl: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (increased for large datasets)
-        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
+        // Wait for dynamic elements to settle (optimized for speed)
+        const baseWait = 2000 + Math.random() * 1000; // Reduced: 2000-3000ms for faster processing
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
@@ -420,7 +420,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         const checkLoaded = () => {
                             loaded++;
                             if (loaded >= totalIframes) {
-                                setTimeout(resolve, 1500); // Extra time after all iframes load
+                                setTimeout(resolve, 800); // Reduced: faster iframe loading
                             }
                         };
                         iframes.forEach(iframe => {
@@ -429,8 +429,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                     checkLoaded();
                                 } else {
                                     iframe.onload = checkLoaded;
-                                    // Timeout after 4 seconds per iframe
-                                    setTimeout(checkLoaded, 4000);
+                                    // Timeout after 2 seconds per iframe (reduced for speed)
+                                    setTimeout(checkLoaded, 2000);
                                 }
                             } catch (e) {
                                 // Cross-origin iframe, count as loaded
@@ -443,45 +443,41 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                 }
             });
         } catch (e) {
-            // If iframe check fails, wait a bit anyway
-            await sleep(1000);
+            // If iframe check fails, wait a bit anyway (reduced for speed)
+            await sleep(500); // Reduced from 1000ms
         }
 
-        // Random mouse movements for more human-like behavior
+        // Reduced mouse movements for speed (still human-like but faster)
         try {
             const client = await page.target().createCDPSession();
-            const movements = 2 + Math.floor(Math.random() * 3); // 2-4 movements
+            const movements = 1 + Math.floor(Math.random() * 2); // 1-2 movements (reduced)
             for (let i = 0; i < movements; i++) {
                 await client.send('Input.dispatchMouseEvent', {
                     type: 'mouseMoved',
                     x: Math.random() * viewport.width,
                     y: Math.random() * viewport.height
                 });
-                await sleep(200 + Math.random() * 300);
+                await sleep(100 + Math.random() * 150); // Faster movements
             }
         } catch (e) { /* Ignore if CDP fails */ }
 
         // All ads (video, text, image) will now be processed.
 
-        // Human-like interaction (optimized for speed while staying safe)
+        // Faster human-like interaction (optimized for speed)
         await page.evaluate(async () => {
-            // Quick but natural scrolling with random pauses
-            for (let i = 0; i < 3; i++) {
-                window.scrollBy(0, 150 + Math.random() * 100);
-                await new Promise(r => setTimeout(r, 200 + Math.random() * 150));
-                // Random pause sometimes (30% chance)
-                if (Math.random() < 0.3) {
-                    await new Promise(r => setTimeout(r, 300 + Math.random() * 200));
-                }
+            // Reduced scrolling iterations for speed
+            for (let i = 0; i < 2; i++) { // Reduced from 3 to 2
+                window.scrollBy(0, 200 + Math.random() * 100);
+                await new Promise(r => setTimeout(r, 150 + Math.random() * 100)); // Faster
             }
             // Scroll back up a bit
             window.scrollBy(0, -100);
-            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => setTimeout(r, 150)); // Faster
         });
 
-        // Random pause before extraction (10-30% chance, adds randomness)
-        if (Math.random() < 0.2) {
-            const randomPause = 500 + Math.random() * 1000;
+        // Reduced random pause (10% chance instead of 20%)
+        if (Math.random() < 0.1) {
+            const randomPause = 300 + Math.random() * 500; // Reduced pause time
             await sleep(randomPause);
         }
 
@@ -749,8 +745,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                 try {
                     console.log(`  📝 Extracting subtitle (cS4Vcb-vnv8ic)...`);
                     
-                    // Wait a bit more for dynamic content to load (but don't wait too long)
-                    await sleep(1000 + Math.random() * 500);
+                    // Reduced wait for dynamic content (optimized for speed)
+                    await sleep(500 + Math.random() * 300); // Reduced from 1000-1500ms to 500-800ms
                     
                     const client = await page.target().createCDPSession();
                     
@@ -826,7 +822,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                 await page.evaluate((x, y) => {
                                                     window.scrollTo(x - window.innerWidth / 2, y - window.innerHeight / 2);
                                                 }, absoluteX, absoluteY);
-                                                await sleep(300);
+                                                await sleep(200); // Reduced from 300ms
                                                 
                                                 // Hover on the subtitle element
                                                 await client.send('Input.dispatchMouseEvent', {
@@ -834,7 +830,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                     x: absoluteX,
                                                     y: absoluteY
                                                 });
-                                                await sleep(800 + Math.random() * 400); // Wait for hover effects
+                                                await sleep(400 + Math.random() * 200); // Reduced: 400-600ms (was 800-1200ms)
                                                 
                                                 // After hover, extract the text from the subtitle element
                                                 const hoveredText = await frame.evaluate(() => {
@@ -956,14 +952,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                 await page.evaluate((x, y) => {
                                     window.scrollTo(x - window.innerWidth / 2, y - window.innerHeight / 2);
                                 }, subtitleEl.x, subtitleEl.y);
-                                await sleep(300);
+                                await sleep(200); // Reduced from 300ms
                                 
                                 await client.send('Input.dispatchMouseEvent', {
                                     type: 'mouseMoved',
                                     x: subtitleEl.x,
                                     y: subtitleEl.y
                                 });
-                                await sleep(800 + Math.random() * 400);
+                                await sleep(400 + Math.random() * 200); // Reduced: 400-600ms (was 800-1200ms)
                                 
                                 const hoveredText = await page.evaluate((x, y) => {
                                     const element = document.elementFromPoint(x, y);
@@ -1060,7 +1056,7 @@ async function extractWithRetry(item, browser) {
             console.log(`  ⚠️ Attempt ${attempt} partial success: Metadata=${metadataSuccess}. Retrying...`);
         }
 
-        await randomDelay(2000, 4000);
+        await randomDelay(1000, 2000); // Reduced retry delay for speed
     }
     // If we're here, we exhausted retries. Return whatever we have.
     return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
@@ -1206,8 +1202,8 @@ async function extractWithRetry(item, browser) {
             }
 
             if (!blocked) {
-                // Adaptive delay: reduce delay if we're having success (faster processing)
-                const adaptiveMultiplier = Math.max(0.7, 1 - (consecutiveSuccessBatches * 0.05)); // Reduce delay by 5% per successful batch, min 70%
+                // Adaptive delay: reduce delay more aggressively if we're having success (faster processing)
+                const adaptiveMultiplier = Math.max(0.5, 1 - (consecutiveSuccessBatches * 0.08)); // Reduce delay by 8% per successful batch, min 50% (more aggressive)
                 const adjustedMin = BATCH_DELAY_MIN * adaptiveMultiplier;
                 const adjustedMax = BATCH_DELAY_MAX * adaptiveMultiplier;
                 const batchDelay = adjustedMin + Math.random() * (adjustedMax - adjustedMin);
