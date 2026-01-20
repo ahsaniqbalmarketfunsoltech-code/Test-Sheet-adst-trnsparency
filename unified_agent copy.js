@@ -184,10 +184,9 @@ async function batchWriteToSheet(sheets, updates) {
         if (advertiserName && advertiserName !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
         }
-        // Write store link (Column C) - only if not SKIP
-        if (storeLink && storeLink !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
-        }
+        // Write store link (Column C) - ALWAYS write (NOT_FOUND if missing, but always write to sheet)
+        const storeLinkValue = storeLink && storeLink !== 'SKIP' ? storeLink : 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
         // Write app name (Column D) - only if not SKIP
         if (appName && appName !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
@@ -652,56 +651,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                             return null;
                         };
                         
-                        // Try extracting from meta tag first (highest priority)
+                        // =====================================================
+                        // EXTRACT STORE LINK - ONLY FROM FIRST META DATA-ASOCH-META
+                        // This is the ONLY method to extract store links
+                        // =====================================================
                         const metaStoreLink = extractFromMetaTag();
                         if (metaStoreLink) {
                             data.storeLink = metaStoreLink;
                             data.metaStoreLinkFound = metaStoreLink; // Flag to log outside
                         }
-
-                        // =====================================================
-                        // ULTRA-PRECISE STORE LINK EXTRACTOR
-                        // Only accepts REAL Play Store / App Store links
-                        // =====================================================
-                        const extractStoreLink = (href) => {
-                            if (!href || typeof href !== 'string') return null;
-                            if (href.includes('javascript:') || href === '#') return null;
-
-                            const isValidStoreLink = (url) => {
-                                if (!url) return false;
-                                const isPlayStore = url.includes('play.google.com/store/apps') && url.includes('id=');
-                                const isAppStore = (url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/');
-                                return isPlayStore || isAppStore;
-                            };
-
-                            if (isValidStoreLink(href)) return href;
-
-                            if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
-                                try {
-                                    const patterns = [
-                                        /[?&]adurl=([^&\s]+)/i,
-                                        /[?&]dest=([^&\s]+)/i,
-                                        /[?&]url=([^&\s]+)/i
-                                    ];
-                                    for (const pattern of patterns) {
-                                        const match = href.match(pattern);
-                                        if (match && match[1]) {
-                                            const decoded = decodeURIComponent(match[1]);
-                                            if (isValidStoreLink(decoded)) return decoded;
-                                        }
-                                    }
-                                } catch (e) { }
-                            }
-
-                            try {
-                                const playMatch = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
-                                if (playMatch && playMatch[1]) return playMatch[1];
-                                const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
-                                if (appMatch && appMatch[1]) return appMatch[1];
-                            } catch (e) { }
-
-                            return null;
-                        };
 
                         // =====================================================
                         // CLEAN APP NAME
@@ -724,8 +682,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         };
 
                         // =====================================================
-                        // EXTRACTION - Find FIRST element with BOTH name + store link
-                        // Uses PRECISE selectors from app_data_agent.js
+                        // EXTRACT APP NAME ONLY (no store link extraction here)
                         // =====================================================
                         const appNameSelectors = [
                             'a[data-asoch-targets*="ochAppName"]',
@@ -741,38 +698,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                 const rawName = el.innerText || el.textContent || '';
                                 const appName = cleanAppName(rawName);
                                 if (!appName || appName.toLowerCase() === blacklist) continue;
-
-                                const storeLink = extractStoreLink(el.href);
-                                if (appName && storeLink) {
-                                    return { appName, storeLink, isVideo: true, isHidden: false };
-                                } else if (appName && !data.appName) {
+                                
+                                // Only extract app name, NOT store link (store link comes from meta tag only)
+                                if (appName && !data.appName) {
                                     data.appName = appName;
+                                    break;
                                 }
                             }
-                        }
-
-                        // If we already found store link from meta tag, use it
-                        if (data.storeLink) {
-                            // Store link already found from meta tag, continue
-                        }
-                        // Backup: Install button for link
-                        else if (data.appName && !data.storeLink) {
-                            const installSels = [
-                                'a[data-asoch-targets*="ochButton"]',
-                                'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]'
-                            ];
-                            for (const sel of installSels) {
-                                const el = root.querySelector(sel);
-                                if (el && el.href) {
-                                    const storeLink = extractStoreLink(el.href);
-                                    if (storeLink) {
-                                        data.storeLink = storeLink;
-                                        data.isVideo = true;
-                                        break;
-                                    }
-                                }
-                            }
+                            if (data.appName) break;
                         }
 
                         // Fallback for app name only
