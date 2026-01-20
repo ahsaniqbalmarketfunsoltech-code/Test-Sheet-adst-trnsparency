@@ -132,23 +132,18 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 const isEmpty = (val) => !val || val === 'NOT_FOUND' || val === 'SKIP' || val === 'EMPTY';
 
                 const hasLink = !isEmpty(storeLink);
-                const hasName = !isEmpty(appName);
-                const hasSubtitle = !isEmpty(appSubtitle);
-                const hasImage = !isEmpty(imageUrl);
 
-                // Row needs processing if it's missing metadata
-                const needsMetadata = !hasLink || !hasName || !hasSubtitle || !hasImage;
-
-                if (!needsMetadata) {
-                    continue; // Skip - already has all metadata
+                // Row needs processing if it's missing App Link (Column C)
+                if (hasLink) {
+                    continue; // Skip - already has a link in Column C
                 }
 
                 toProcess.push({
                     url,
                     rowIndex: actualRowIndex,
-                    needsMetadata,
+                    needsMetadata: true,
                     needsVideoId: false, // We no longer look for video IDs
-                    existingStoreLink: hasLink ? storeLink : ''
+                    existingStoreLink: ''
                 });
             }
 
