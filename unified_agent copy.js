@@ -586,26 +586,34 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             '.ns-yp8c1-e-18.headline',  // Video ad headline
                             '[class*="yp8c1"][class*="headline"]',
                             '.headline',
+                            '.ad-title',
+                            '[class*="ad-title"]',
                             '[class*="vmv8lc"]',
                             '[class*="tagline"]',
-                            '[class*="subtitle"]'
+                            '[class*="subtitle"]',
+                            '.header-text',
+                            'h1, h2, h3' // Final fallbacks
                         ];
                         // First try on root, then on document
                         for (const searchRoot of [root, document]) {
-                            if (data.appSubtitle) break;
+                            if (data.appSubtitle && data.appSubtitle !== 'NOT_FOUND') break;
                             for (const sel of subtitleSelectors) {
                                 try {
-                                    const el = searchRoot.querySelector(sel);
-                                    if (el) {
+                                    const elements = searchRoot.querySelectorAll(sel);
+                                    for (const el of elements) {
                                         const text = (el.innerText || el.textContent || '').trim();
-                                        // Relaxed validation - just check length and not pure numbers/symbols
-                                        if (text && text.length >= 3 && text.length <= 200) {
-                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes('{')) {
-                                                data.appSubtitle = text;
-                                                break;
+                                        // Relaxed validation
+                                        if (text && text.length >= 3 && text.length <= 250) {
+                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes('{') && !text.includes('<')) {
+                                                // Check if it's not the advertiser name
+                                                if (text.toLowerCase() !== blacklist) {
+                                                    data.appSubtitle = text;
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
+                                    if (data.appSubtitle) break;
                                 } catch (e) { }
                             }
                         }
@@ -702,8 +710,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             'a[data-asoch-targets*="ochAppName"]',
                             'a[data-asoch-targets*="appname" i]',
                             'a[data-asoch-targets*="rrappname" i]',
-                            'a[class*="short-app-name"]',
-                            '.short-app-name a'
+                            '.ad-header-text',         // Text ad header
+                            '[class*="header-text"]',
+                            '[class*="short-app-name"]',
+                            '.short-app-name a',
+                            '.visible-app-name',
+                            '[class*="app-name"]',
+                            '[class*="appName"]',
+                            '.app-name'
                         ];
 
                         for (const selector of appNameSelectors) {
@@ -1203,6 +1217,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 }
 
 async function extractWithRetry(item, browser) {
+    let bestResult = null;
+
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         if (attempt > 1) console.log(`  🔄 Retry ${attempt}/${MAX_RETRIES}...`);
 
@@ -1217,41 +1233,53 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
-        // If all fields are SKIP (text ad or Apple Store ad), return immediately - no retries needed
-        if (data.storeLink === 'SKIP' && data.appName === 'SKIP' && data.videoId === 'SKIP') {
-            return data;
+        // Update bestResult with any non-NOT_FOUND data we find
+        if (!bestResult) {
+            bestResult = { ...data };
+        } else {
+            // Merge results: keep what we already found if new attempt returns NOT_FOUND
+            if (data.advertiserName !== 'NOT_FOUND' && data.advertiserName !== 'SKIP') bestResult.advertiserName = data.advertiserName;
+            if (data.appName !== 'NOT_FOUND' && data.appName !== 'SKIP') bestResult.appName = data.appName;
+            if (data.storeLink !== 'NOT_FOUND' && data.storeLink !== 'SKIP') bestResult.storeLink = data.storeLink;
+            if (data.videoId !== 'NOT_FOUND' && data.videoId !== 'SKIP') bestResult.videoId = data.videoId;
+            if (data.appSubtitle !== 'NOT_FOUND' && data.appSubtitle !== 'SKIP') bestResult.appSubtitle = data.appSubtitle;
+            if (data.imageUrl !== 'NOT_FOUND' && data.imageUrl !== 'SKIP') bestResult.imageUrl = data.imageUrl;
         }
 
-        // Determine if we have a valid store link (either from before or just found)
-        const currentStoreLink = (data.storeLink && data.storeLink !== 'SKIP' && data.storeLink !== 'NOT_FOUND')
-            ? data.storeLink
+        // If all fields are SKIP, return immediately
+        if (data.storeLink === 'SKIP' && data.appName === 'SKIP' && data.videoId === 'SKIP') {
+            return bestResult;
+        }
+
+        // Determine if we have a valid store link
+        const currentStoreLink = (bestResult.storeLink && bestResult.storeLink !== 'SKIP' && bestResult.storeLink !== 'NOT_FOUND')
+            ? bestResult.storeLink
             : item.existingStoreLink;
 
         const isPlayStore = currentStoreLink && currentStoreLink.includes('play.google.com');
         const isAppleStore = currentStoreLink && currentStoreLink.includes('apps.apple.com');
 
         // Success criteria:
-        // 1. If we needed metadata, did we find it? (at least one of appName or storeLink)
-        const metadataSuccess = !item.needsMetadata || (data.storeLink !== 'NOT_FOUND' || data.appName !== 'NOT_FOUND');
+        const metadataSuccess = !item.needsMetadata || (bestResult.storeLink !== 'NOT_FOUND' || bestResult.appName !== 'NOT_FOUND');
 
-        // 2. Video ID success (SPEED OPTIMIZED):
-        // - Apple Store: always success (SKIP is fine, no retries needed)
-        // - Text ad: always success (SKIP is fine, no retries needed)
-        // - Play Store video ads: need actual video ID (NOT_FOUND = retry, SKIP = success for text ads)
-        // - Non-Play Store: always success (no video expected)
-        const videoSuccess = isAppleStore || !isPlayStore || data.videoId === 'SKIP' || (data.videoId !== 'NOT_FOUND' && data.videoId !== null);
+        // Video success: 
+        // - If we found a video ID, great! 
+        // - If it's a text ad (found headline/subtitle in Col F), then we don't strictly need a video ID.
+        const hasHeadline = bestResult.appSubtitle && bestResult.appSubtitle !== 'NOT_FOUND' && bestResult.appSubtitle !== 'SKIP';
+        const videoSuccess = isAppleStore || !isPlayStore || bestResult.videoId === 'SKIP' ||
+            (bestResult.videoId !== 'NOT_FOUND' && bestResult.videoId !== null) ||
+            (metadataSuccess && hasHeadline); // If it's a text ad with a headline, call it success
 
-        // We only return if BOTH are successful
         if (metadataSuccess && videoSuccess) {
-            return data;
+            return bestResult;
         } else {
-            console.log(`  ⚠️ Attempt ${attempt} partial success: Metadata=${metadataSuccess}, Video=${videoSuccess}. Retrying...`);
+            console.log(`  ⚠️ Attempt ${attempt} result: Metadata=${metadataSuccess}, Video=${videoSuccess}.`);
         }
 
-        await randomDelay(2000, 4000);
+        await randomDelay(1500, 3000);
     }
-    // If we're here, we exhausted retries. Return whatever we have.
-    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
+
+    return bestResult || { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
 }
 
 // ============================================
