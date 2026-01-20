@@ -576,77 +576,75 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         }
 
                         // =====================================================
-                        // EXTRACT STORE LINK FROM META DATA-ASOCH-META (OPTIMIZED)
-                        // Priority method: Extract from <meta data-asoch-meta> tags
+                        // EXTRACT STORE LINK FROM FIRST META DATA-ASOCH-META
+                        // Get the FIRST meta tag with data-asoch-meta and extract package name
                         // =====================================================
                         const extractFromMetaTag = () => {
                             try {
-                                const metaTags = root.querySelectorAll('meta[data-asoch-meta]');
-                                if (metaTags.length === 0) return null;
+                                // Get the FIRST meta tag with data-asoch-meta (as user specified)
+                                const firstMetaTag = root.querySelector('meta[data-asoch-meta]');
+                                if (!firstMetaTag) return null;
                                 
-                                // Debug: count meta tags found
-                                data.metaTagCount = metaTags.length;
+                                const metaData = firstMetaTag.getAttribute('data-asoch-meta');
+                                if (!metaData) return null;
                                 
-                                // Optimized: Try fast regex extraction first (no JSON parsing needed)
-                                for (const meta of metaTags) {
-                                    const metaData = meta.getAttribute('data-asoch-meta');
-                                    if (!metaData) continue;
-                                    
-                                    // Fast path: Direct regex extraction (faster than JSON parsing)
-                                    const fastPackageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
-                                    if (fastPackageMatch) {
-                                        const packageName = fastPackageMatch[1] || fastPackageMatch[2];
-                                        if (packageName && packageName.length > 3) {
-                                            return `https://play.google.com/store/apps/details?id=${packageName}`;
-                                        }
+                                // Debug: count all meta tags found
+                                const allMetaTags = root.querySelectorAll('meta[data-asoch-meta]');
+                                data.metaTagCount = allMetaTags.length;
+                                
+                                // Extract package name directly from the FIRST meta tag
+                                // Try multiple patterns to find the package name
+                                
+                                // Pattern 1: Direct regex extraction (fastest)
+                                const fastPackageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
+                                if (fastPackageMatch) {
+                                    const packageName = fastPackageMatch[1] || fastPackageMatch[2];
+                                    if (packageName && packageName.length > 3) {
+                                        return `https://play.google.com/store/apps/details?id=${packageName}`;
                                     }
-                                    
-                                    // Fallback: JSON parsing for complex structures
-                                    try {
-                                        const parsed = JSON.parse(metaData);
-                                        if (!Array.isArray(parsed) || parsed.length === 0) continue;
-                                        
+                                }
+                                
+                                // Pattern 2: Parse JSON and extract from ad0 entry
+                                try {
+                                    const parsed = JSON.parse(metaData);
+                                    if (Array.isArray(parsed) && parsed.length > 0) {
                                         const firstArray = parsed[0];
-                                        if (!Array.isArray(firstArray)) continue;
-                                        
-                                        // Find "ad0" entry (optimized: break early)
-                                        for (const entry of firstArray) {
-                                            if (!Array.isArray(entry) || entry.length < 2 || entry[0] !== 'ad0') continue;
-                                            
-                                            const urlString = entry[1];
-                                            if (!urlString) continue;
-                                            
-                                            // Extract from adurl parameter
-                                            const adurlMatch = urlString.match(/[?&]adurl=([^&\s]+)/i);
-                                            if (adurlMatch) {
-                                                try {
-                                                    const decodedUrl = decodeURIComponent(adurlMatch[1]);
-                                                    if (decodedUrl.includes('play.google.com/store/apps/details')) {
-                                                        const pkgMatch = decodedUrl.match(/[?&]id=([a-zA-Z0-9._]+)/);
-                                                        if (pkgMatch && pkgMatch[1]) {
-                                                            return `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
+                                        if (Array.isArray(firstArray)) {
+                                            // Find "ad0" entry
+                                            for (const entry of firstArray) {
+                                                if (Array.isArray(entry) && entry.length > 1 && entry[0] === 'ad0') {
+                                                    const urlString = entry[1];
+                                                    if (urlString) {
+                                                        // Extract from adurl parameter
+                                                        const adurlMatch = urlString.match(/[?&]adurl=([^&\s]+)/i);
+                                                        if (adurlMatch) {
+                                                            try {
+                                                                const decodedUrl = decodeURIComponent(adurlMatch[1]);
+                                                                if (decodedUrl.includes('play.google.com/store/apps/details')) {
+                                                                    const pkgMatch = decodedUrl.match(/[?&]id=([a-zA-Z0-9._]+)/);
+                                                                    if (pkgMatch && pkgMatch[1]) {
+                                                                        return `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
+                                                                    }
+                                                                }
+                                                            } catch (e) { }
                                                         }
-                                                        return decodedUrl;
+                                                        
+                                                        // Extract package directly from URL string
+                                                        const pkgMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
+                                                        if (pkgMatch) {
+                                                            const pkgName = pkgMatch[1] || pkgMatch[2];
+                                                            if (pkgName) {
+                                                                return `https://play.google.com/store/apps/details?id=${pkgName}`;
+                                                            }
+                                                        }
                                                     }
-                                                } catch (e) { continue; }
-                                            }
-                                            
-                                            // Extract package directly from URL string
-                                            const pkgMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
-                                            if (pkgMatch) {
-                                                const pkgName = pkgMatch[1] || pkgMatch[2];
-                                                if (pkgName) {
-                                                    return `https://play.google.com/store/apps/details?id=${pkgName}`;
+                                                    break; // Found ad0, stop
                                                 }
                                             }
-                                            
-                                            // Found ad0 entry, no need to continue
-                                            break;
                                         }
-                                    } catch (e) {
-                                        // JSON parse failed, already tried fast path above
-                                        continue;
                                     }
+                                } catch (e) {
+                                    // JSON parse failed, already tried fast path above
                                 }
                             } catch (e) {
                                 // Silently fail
@@ -881,69 +879,64 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                 try {
                     const metaStoreLink = await page.evaluate(() => {
                         try {
-                            const metaTags = document.querySelectorAll('meta[data-asoch-meta]');
-                            if (metaTags.length === 0) return null;
+                            // Get the FIRST meta tag with data-asoch-meta (as user specified)
+                            const firstMetaTag = document.querySelector('meta[data-asoch-meta]');
+                            if (!firstMetaTag) return null;
                             
-                            // Optimized: Try fast regex extraction first (no JSON parsing needed)
-                            for (const meta of metaTags) {
-                                const metaData = meta.getAttribute('data-asoch-meta');
-                                if (!metaData) continue;
-                                
-                                // Fast path: Direct regex extraction (faster than JSON parsing)
-                                const fastPackageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
-                                if (fastPackageMatch) {
-                                    const packageName = fastPackageMatch[1] || fastPackageMatch[2];
-                                    if (packageName && packageName.length > 3) {
-                                        return `https://play.google.com/store/apps/details?id=${packageName}`;
-                                    }
+                            const metaData = firstMetaTag.getAttribute('data-asoch-meta');
+                            if (!metaData) return null;
+                            
+                            // Extract package name directly from the FIRST meta tag
+                            // Pattern 1: Direct regex extraction (fastest)
+                            const fastPackageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
+                            if (fastPackageMatch) {
+                                const packageName = fastPackageMatch[1] || fastPackageMatch[2];
+                                if (packageName && packageName.length > 3) {
+                                    return `https://play.google.com/store/apps/details?id=${packageName}`;
                                 }
-                                
-                                // Fallback: JSON parsing for complex structures
-                                try {
-                                    const parsed = JSON.parse(metaData);
-                                    if (!Array.isArray(parsed) || parsed.length === 0) continue;
-                                    
+                            }
+                            
+                            // Pattern 2: Parse JSON and extract from ad0 entry
+                            try {
+                                const parsed = JSON.parse(metaData);
+                                if (Array.isArray(parsed) && parsed.length > 0) {
                                     const firstArray = parsed[0];
-                                    if (!Array.isArray(firstArray)) continue;
-                                    
-                                    // Find "ad0" entry (optimized: break early)
-                                    for (const entry of firstArray) {
-                                        if (!Array.isArray(entry) || entry.length < 2 || entry[0] !== 'ad0') continue;
-                                        
-                                        const urlString = entry[1];
-                                        if (!urlString) continue;
-                                        
-                                        // Extract from adurl parameter
-                                        const adurlMatch = urlString.match(/[?&]adurl=([^&\s]+)/i);
-                                        if (adurlMatch) {
-                                            try {
-                                                const decodedUrl = decodeURIComponent(adurlMatch[1]);
-                                                if (decodedUrl.includes('play.google.com/store/apps/details')) {
-                                                    const pkgMatch = decodedUrl.match(/[?&]id=([a-zA-Z0-9._]+)/);
-                                                    if (pkgMatch && pkgMatch[1]) {
-                                                        return `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
+                                    if (Array.isArray(firstArray)) {
+                                        // Find "ad0" entry
+                                        for (const entry of firstArray) {
+                                            if (Array.isArray(entry) && entry.length > 1 && entry[0] === 'ad0') {
+                                                const urlString = entry[1];
+                                                if (urlString) {
+                                                    // Extract from adurl parameter
+                                                    const adurlMatch = urlString.match(/[?&]adurl=([^&\s]+)/i);
+                                                    if (adurlMatch) {
+                                                        try {
+                                                            const decodedUrl = decodeURIComponent(adurlMatch[1]);
+                                                            if (decodedUrl.includes('play.google.com/store/apps/details')) {
+                                                                const pkgMatch = decodedUrl.match(/[?&]id=([a-zA-Z0-9._]+)/);
+                                                                if (pkgMatch && pkgMatch[1]) {
+                                                                    return `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
+                                                                }
+                                                            }
+                                                        } catch (e) { }
                                                     }
-                                                    return decodedUrl;
+                                                    
+                                                    // Extract package directly from URL string
+                                                    const pkgMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
+                                                    if (pkgMatch) {
+                                                        const pkgName = pkgMatch[1] || pkgMatch[2];
+                                                        if (pkgName) {
+                                                            return `https://play.google.com/store/apps/details?id=${pkgName}`;
+                                                        }
+                                                    }
                                                 }
-                                            } catch (e) { continue; }
-                                        }
-                                        
-                                        // Extract package directly from URL string
-                                        const pkgMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
-                                        if (pkgMatch) {
-                                            const pkgName = pkgMatch[1] || pkgMatch[2];
-                                            if (pkgName) {
-                                                return `https://play.google.com/store/apps/details?id=${pkgName}`;
+                                                break; // Found ad0, stop
                                             }
                                         }
-                                        
-                                        // Found ad0 entry, no need to continue
-                                        break;
                                     }
-                                } catch (e) {
-                                    // JSON parse failed, already tried fast path above
-                                    continue;
                                 }
+                            } catch (e) {
+                                // JSON parse failed, already tried fast path above
                             }
                         } catch (e) {
                             // Silently fail
