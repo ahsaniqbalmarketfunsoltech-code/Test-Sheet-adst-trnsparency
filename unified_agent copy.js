@@ -30,7 +30,7 @@ const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 4;
+const MAX_RETRIES = 3;
 const POST_CLICK_WAIT = 6000;
 const RETRY_WAIT_MULTIPLIER = 1.25;
 const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
@@ -128,22 +128,27 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
 
                 if (!url) continue;
 
-                // SKIP ONLY: Rows with Play Store link in Column C
-                const hasPlayStoreLink = storeLink && storeLink.includes('play.google.com');
-                if (hasPlayStoreLink) {
-                    continue; // Skip - already has Play Store link
+                // Check for missing fields
+                const isEmpty = (val) => !val || val === 'NOT_FOUND' || val === 'SKIP' || val === 'EMPTY';
+
+                const hasLink = !isEmpty(storeLink);
+                const hasName = !isEmpty(appName);
+                const hasSubtitle = !isEmpty(appSubtitle);
+                const hasImage = !isEmpty(imageUrl);
+
+                // Row needs processing if it's missing metadata
+                const needsMetadata = !hasLink || !hasName || !hasSubtitle || !hasImage;
+
+                if (!needsMetadata) {
+                    continue; // Skip - already has all metadata
                 }
 
-                // Process all other rows
-                // Check if values are empty or NOT_FOUND (treat NOT_FOUND as needing retry)
-                const isEmpty = (val) => !val || val === 'NOT_FOUND' || val === 'SKIP';
-                const needsMetadata = isEmpty(storeLink) || isEmpty(appName) || isEmpty(appSubtitle) || isEmpty(imageUrl);
                 toProcess.push({
                     url,
                     rowIndex: actualRowIndex,
                     needsMetadata,
-                    needsVideoId: true,
-                    existingStoreLink: (!storeLink || storeLink === 'NOT_FOUND') ? '' : storeLink
+                    needsVideoId: false, // We no longer look for video IDs
+                    existingStoreLink: hasLink ? storeLink : ''
                 });
             }
 
@@ -342,37 +347,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         };
     }, screenWidth, screenHeight);
 
-    // VIDEO ID CAPTURE + SPEED OPTIMIZATION
+    // SPEED OPTIMIZATION (BLOCK UNNECESSARY RESOURCES)
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
-
-        // Capture video ID from googlevideo.com requests
-        if (requestUrl.includes('googlevideo.com/videoplayback')) {
-            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-            const id = urlParams.get('id');
-            if (id && /^[a-f0-9]{18}$|^[a-f0-9]{16}$/.test(id)) {
-                capturedVideoId = id;
-            }
-        }
-        // Capture from YouTube embeds
-        else if (requestUrl.includes('youtube.com/embed/')) {
-            const match = requestUrl.match(/\/embed\/([^?]+)/);
-            if (match && match[1]) {
-                capturedVideoId = match[1];
-            }
-        }
-        // Capture from YouTube get_video_info or watch
-        else if (requestUrl.includes('youtube.com/watch') || requestUrl.includes('youtube.com/get_video_info')) {
-            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-            const v = urlParams.get('video_id') || urlParams.get('v');
-            if (v && v.length >= 11) {
-                capturedVideoId = v;
-            }
-        }
-
         const resourceType = request.resourceType();
-        // Abort more resource types for speed: image, font, stylesheet (optional but fast), and tracking
+
+        // Block heavy/tracking resources
         const blockedTypes = ['image', 'font', 'other', 'stylesheet'];
         const blockedPatterns = [
             'analytics', 'google-analytics', 'doubleclick', 'pagead',
@@ -727,7 +708,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             '.visible-app-name',
                             '[class*="app-name"]',
                             '[class*="appName"]',
-                            '.app-name'
+                            '.app-name',
+                            '.ad-listing-title',
+                            '[aria-label*="appName" i]',
+                            'div[class*="header"] > span'
                         ];
 
                         for (const selector of appNameSelectors) {
@@ -1083,139 +1067,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             }
         }
 
-        // =====================================================
-        // PHASE 2: VIDEO ID EXTRACTION
-        // Only extract for Play Store video ads
-        // Text ads and Apple Store ads already skipped earlier
-        // =====================================================
-        const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
-        const isPlayStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('play.google.com');
-        const isAppleStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('apps.apple.com');
-
-        // Extract video ID if needed (for all video ads)
-        if (needsVideoId || needsMetadata) {
-            console.log(`  🎬 Extracting Video ID...`);
-
-            // Find and click play button (EXACT from agent.js)
-            const playButtonInfo = await page.evaluate(() => {
-                const results = { found: false, x: 0, y: 0 };
-                const searchForPlayButton = (root) => {
-                    const playSelectors = ['.play-button', '.ytp-large-play-button', '.ytp-play-button', 'video', '[aria-label*="Play" i]'];
-                    for (const sel of playSelectors) {
-                        const btn = root.querySelector(sel);
-                        if (btn) {
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width > 5 && rect.height > 5) {
-                                results.found = true;
-                                results.x = rect.left + rect.width / 2;
-                                results.y = rect.top + rect.height / 2;
-                                return true;
-                            }
-                        }
-                    }
-                    const elements = root.querySelectorAll('*');
-                    for (const el of elements) {
-                        if (el.shadowRoot) {
-                            if (searchForPlayButton(el.shadowRoot)) return true;
-                        }
-                    }
-                    return false;
-                };
-
-                const iframes = document.querySelectorAll('iframe');
-                for (let i = 0; i < iframes.length; i++) {
-                    try {
-                        const iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow?.document;
-                        if (iframeDoc) {
-                            const found = searchForPlayButton(iframeDoc);
-                            if (found) break;
-                        }
-                    } catch (e) { }
-                }
-                if (!results.found) searchForPlayButton(document);
-
-                // Fallback: click center of visible iframe
-                if (!results.found) {
-                    for (const iframe of iframes) {
-                        const rect = iframe.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            results.found = true;
-                            results.x = rect.left + rect.width / 2;
-                            results.y = rect.top + rect.height / 2;
-                            break;
-                        }
-                    }
-                }
-                return results;
-            });
-
-            if (playButtonInfo.found) {
-                try {
-                    const client = await page.target().createCDPSession();
-
-                    // More human-like mouse movement: gradual approach to button
-                    const startX = Math.random() * viewport.width;
-                    const startY = Math.random() * viewport.height;
-                    const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
-
-                    for (let i = 0; i <= steps; i++) {
-                        const progress = i / steps;
-                        const currentX = startX + (playButtonInfo.x - startX) * progress;
-                        const currentY = startY + (playButtonInfo.y - startY) * progress;
-                        await client.send('Input.dispatchMouseEvent', {
-                            type: 'mouseMoved',
-                            x: currentX,
-                            y: currentY
-                        });
-                        await sleep(50 + Math.random() * 50); // Variable speed
-                    }
-
-                    // Hover briefly before clicking (more human-like)
-                    await sleep(150 + Math.random() * 100);
-
-                    // Click with slight randomness in position
-                    const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
-                    const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
-
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mousePressed',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-                    await sleep(80 + Math.random() * 40);
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mouseReleased',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-
-                    // Wait for video to load (poll for capturedVideoId)
-                    const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
-                    const startTime = Date.now();
-                    while (Date.now() - startTime < waitTime && !capturedVideoId) {
-                        await sleep(300); // Faster polling
-                    }
-
-                    if (capturedVideoId) {
-                        result.videoId = capturedVideoId;
-                        console.log(`  ✓ Video ID: ${capturedVideoId}`);
-                    } else {
-                        result.videoId = 'NOT_FOUND';
-                        console.log(`  ⚠️ No video ID captured`);
-                    }
-                } catch (e) {
-                    console.log(`  ⚠️ Click failed: ${e.message}`);
-                    result.videoId = 'NOT_FOUND';
-                }
-            } else {
-                result.videoId = 'NOT_FOUND';
-                console.log(`  ⚠️ No play button found`);
-            }
-        }
+        // Video ID is no longer requested
+        result.videoId = 'NOT_FOUND';
 
         await page.close();
         return result;
@@ -1269,30 +1122,18 @@ async function extractWithRetry(item, browser) {
         const isPlayStore = currentStoreLink && currentStoreLink.includes('play.google.com');
         const isAppleStore = currentStoreLink && currentStoreLink.includes('apps.apple.com');
 
-        // Success criteria:
+        // Success criteria (METADATA ONLY):
         const hasName = bestResult.appName && bestResult.appName !== 'NOT_FOUND' && bestResult.appName !== 'SKIP';
         const hasLink = bestResult.storeLink && bestResult.storeLink !== 'NOT_FOUND' && bestResult.storeLink !== 'SKIP';
-        const hasVideo = bestResult.videoId && bestResult.videoId !== 'NOT_FOUND' && bestResult.videoId !== 'SKIP';
         const hasSubtitle = bestResult.appSubtitle && bestResult.appSubtitle !== 'NOT_FOUND' && bestResult.appSubtitle !== 'SKIP';
+        const hasImage = bestResult.imageUrl && bestResult.imageUrl !== 'NOT_FOUND' && bestResult.imageUrl !== 'SKIP';
 
-        const metadataSuccess = !item.needsMetadata || (hasName && hasLink);
+        const success = !item.needsMetadata || (hasName && hasLink);
 
-        // Video success: 
-        // - If we found a video ID, great! 
-        // - If it's a text/image ad (no video expected), metadata + subtitle is enough.
-        // - We also check the mainPageInfo from the last attempt to see if it even detected a video
-        const videoSuccess = !item.needsVideoId || hasVideo || isAppleStore || !isPlayStore || (metadataSuccess && hasSubtitle);
-
-        if (metadataSuccess && videoSuccess) {
+        if (success) {
             return bestResult;
         } else {
-            console.log(`  ⚠️ Attempt ${attempt} result: Metadata=${metadataSuccess}, Video=${videoSuccess}.`);
-
-            // Optimization: If we found metadata but missing video ID, update next attempt to only focus on video
-            if (metadataSuccess && !videoSuccess) {
-                item.needsMetadata = false;
-                item.existingStoreLink = bestResult.storeLink;
-            }
+            console.log(`  ⚠️ Attempt ${attempt} result: Success=${success}`);
         }
 
         await randomDelay(1500, 3000);
