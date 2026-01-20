@@ -28,7 +28,7 @@ const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Test'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 2000; // Rows to load per batch
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 3; // Process 3 rows at a time
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
 const POST_CLICK_WAIT = 6000;
@@ -119,7 +119,9 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
 
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
-                const actualRowIndex = startRow + i; // Actual row number in sheet
+                // CRITICAL: actualRowIndex is 0-based (0=header, 1=first data row)
+                // This will be converted to 1-based when writing: rowNum = rowIndex + 1
+                const actualRowIndex = startRow + i; // 0-based row index (1 = row 2 in sheet)
                 const url = (row[1] || '').trim();
                 const storeLink = (row[2] || '').trim();
                 const appName = row[3]?.trim() || '';
@@ -177,7 +179,17 @@ async function batchWriteToSheet(sheets, updates) {
 
     const data = [];
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId, appSubtitle, imageUrl }) => {
+        // CRITICAL: rowIndex is 0-based, rowNum is 1-based (Google Sheets)
         const rowNum = rowIndex + 1;
+
+        // Log which row we're writing to for verification
+        const hasData = (advertiserName && !['SKIP', 'NOT_FOUND', 'BLOCKED', 'ERROR'].includes(advertiserName)) ||
+            (storeLink && storeLink !== 'SKIP' && storeLink !== 'ERROR') ||
+            (appName && appName !== 'SKIP' && appName !== 'ERROR');
+
+        if (hasData) {
+            console.log(`  📝 Writing data to Row ${rowNum} (rowIndex=${rowIndex})`);
+        }
 
         // Only write advertiser name if it's found and not a generic skip/error
         if (advertiserName && !['SKIP', 'NOT_FOUND', 'BLOCKED', 'ERROR'].includes(advertiserName)) {
@@ -260,6 +272,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // Normalize whitespace
         cleaned = cleaned.replace(/\s+/g, ' ').trim();
+
+        // Blacklist for app names (Global)
+        const blacklistNames = [
+            'ad details', 'google ads', 'transparency center', 'about this ad',
+            'privacy policy', 'terms of service', 'install now', 'download',
+            'play store', 'app store', 'advertisement', 'sponsored',
+            'open', 'get', 'visit', 'learn more', 'blocked'
+        ];
+        if (blacklistNames.some(n => cleaned.toLowerCase() === n || cleaned.toLowerCase().includes(n))) return 'NOT_FOUND';
 
         // Length check
         if (cleaned.length < 2 || cleaned.length > 80) return 'NOT_FOUND';
@@ -788,8 +809,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     }
                                 }
 
-                                // Method 3: Look for package name pattern directly
-                                // Package names like: com.walk.walkwin, com.app.game, etc.
+                                // Method 3: DISABLED (Risky - matches any package-like string)
+                                /*
                                 const pkgMatches = metaValue.match(/["']([a-z][a-z0-9_]*(\.[a-z0-9_]+){2,})["']/gi);
                                 if (pkgMatches) {
                                     for (const pkg of pkgMatches) {
@@ -806,6 +827,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     }
                                     if (data.storeLink) break;
                                 }
+                                */
                             }
                         }
 
@@ -875,11 +897,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             }
 
             // Final fallback from Meta/Title
-            if (result.appName === 'NOT_FOUND' || result.appName === 'Ad Details') {
+            if (result.appName === 'NOT_FOUND' || result.appName.toLowerCase().includes('ad details')) {
                 try {
                     const title = await page.title();
-                    if (title && !title.toLowerCase().includes('google ads')) {
-                        result.appName = title.split(' - ')[0].split('|')[0].trim();
+                    if (title) {
+                        const candidate = title.split(' - ')[0].split('|')[0].trim();
+                        // Validate title candidate
+                        if (cleanName(candidate) !== 'NOT_FOUND') {
+                            result.appName = cleanName(candidate);
+                        }
                     }
                 } catch (e) { }
             }
@@ -1045,25 +1071,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         }
                     }
 
-                    // Method 4: Look for any package name pattern (com.xxx.xxx)
+                    // Method 4: DISABLED - Matches too many unrelated packages (risky)
+                    /*
                     if (result.storeLink === 'NOT_FOUND') {
                         // Search for patterns like "com.walk.walkwin" in the HTML
-                        const packagePattern = /["\s]([a-z][a-z0-9_]*\.[a-z0-9_]+\.[a-z0-9._]+)["\s,\]]/gi;
-                        const allPackages = [...allContent.matchAll(packagePattern)];
-                        const validPackages = allPackages
-                            .map(m => m[1])
-                            .filter(pkg =>
-                                pkg.startsWith('com.') &&
-                                !pkg.includes('google') &&
-                                !pkg.includes('android') &&
-                                pkg.split('.').length >= 3
-                            );
-                        console.log(`  📱 Package name patterns found: ${validPackages.length}`);
-                        if (validPackages.length > 0) {
-                            result.storeLink = `https://play.google.com/store/apps/details?id=${validPackages[0]}`;
-                            console.log(`  ✓ Found store link (package pattern): ${result.storeLink.substring(0, 60)}...`);
-                        }
+                        // DISABLED because it picks up library packages or other ads in the page source
                     }
+                    */
                 } catch (e) {
                     console.log(`  ⚠️ HTML content search failed: ${e.message}`);
                 }
@@ -1243,12 +1257,15 @@ async function extractWithRetry(item, browser) {
                         await sleep(staggerDelay * index);
                     }
 
-                    console.log(`  🚀 Row ${item.rowIndex + 1}: Starting ${item.url.substring(0, 40)}...`);
+                    // CRITICAL: Preserve rowIndex from original item
+                    const originalRowIndex = item.rowIndex;
+                    console.log(`  🚀 Row ${originalRowIndex + 1}: Starting ${item.url.substring(0, 40)}...`);
                     const data = await extractWithRetry(item, browser);
 
+                    // Ensure rowIndex is explicitly set from the original item
                     return {
                         url: item.url,
-                        rowIndex: item.rowIndex,
+                        rowIndex: originalRowIndex, // Explicitly use original rowIndex
                         advertiserName: data.advertiserName,
                         storeLink: data.storeLink,
                         appName: data.appName,
@@ -1258,9 +1275,12 @@ async function extractWithRetry(item, browser) {
                     };
                 }));
 
+                // Sort results by rowIndex to ensure correct order (extra safety)
+                results.sort((a, b) => a.rowIndex - b.rowIndex);
+
                 results.forEach(r => {
                     const linkStatus = r.storeLink && r.storeLink !== 'NOT_FOUND' && r.storeLink !== 'BLOCKED' ? '✅' : '❌';
-                    console.log(`  ${linkStatus} Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 45) || 'NONE'} | Name=${r.appName}`);
+                    console.log(`  ${linkStatus} Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 45) || 'NONE'} | Name=${r.appName} | Writing to sheet row ${r.rowIndex + 1}`);
                 });
 
                 // Separate successful results from blocked ones
