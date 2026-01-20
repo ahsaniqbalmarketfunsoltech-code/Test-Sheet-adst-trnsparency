@@ -53,9 +53,6 @@ jobs:
           PAGE_LOAD_DELAY_MIN: ${{ secrets.PAGE_LOAD_DELAY_MIN || '1000' }}
           PAGE_LOAD_DELAY_MAX: ${{ secrets.PAGE_LOAD_DELAY_MAX || '3000' }}
           PROXIES: ${{ secrets.PROXIES }}
-          MAX_PROXY_ATTEMPTS: ${{ secrets.MAX_PROXY_ATTEMPTS }}
-          PROXY_RETRY_DELAY_MIN: ${{ secrets.PROXY_RETRY_DELAY_MIN }}
-          PROXY_RETRY_DELAY_MAX: ${{ secrets.PROXY_RETRY_DELAY_MAX }}
           PUPPETEER_EXECUTABLE_PATH: ${{ secrets.PUPPETEER_EXECUTABLE_PATH }}
         run: node "unified_agent copy.js"
       

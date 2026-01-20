@@ -30,9 +30,7 @@ const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 2000; // Rows to load per batch
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 3; // Process 3 rows at a time (FIXED: always 3)
 const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 3;
 const POST_CLICK_WAIT = 6000;
-const RETRY_WAIT_MULTIPLIER = 1.25;
 const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
 const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
 
@@ -264,7 +262,7 @@ async function batchWriteToSheet(sheets, updates) {
 // UNIFIED EXTRACTION - ONE VISIT PER URL
 // Both metadata + video ID extracted on same page
 // ============================================
-async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink, attempt = 1) {
+async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink) {
     const page = await browser.newPage();
     let result = {
         advertiserName: 'SKIP',
@@ -469,8 +467,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // Wait for dynamic elements to settle (increased for large datasets)
         const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
-        const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
-        await sleep(baseWait * attemptMultiplier);
+        await sleep(baseWait);
 
         // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
         try {
@@ -651,23 +648,61 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
                         // =====================================================
                         // EXTRACT IMAGE URL (especially for Image Ads)
+                        // Priority: tpc.googlesyndication.com/simgad/ URLs
                         // =====================================================
                         const imageSelectors = [
+                            // Priority 1: Specific image ad selectors (landscape/portrait images)
+                            '#landscape-image',
+                            '#portrait-image',
+                            'img#landscape-image',
+                            'img#portrait-image',
+                            '.landscape-image img',
+                            '.portrait-image img',
+                            '.landscape-card img',
+                            '.portrait-card img',
+                            
+                            // Priority 2: Google syndication image URLs (tpc.googlesyndication.com/simgad/)
+                            'img[src*="tpc.googlesyndication.com/simgad"]',
+                            'img[src*="googlesyndication.com/simgad"]',
+                            'img[src*="simgad"]',
+                            
+                            // Priority 3: General ad image containers
                             '.html-container img',
                             '.creative-container img',
+                            '.ad-image img',
+                            '[class*="ad-image"] img',
+                            '[class*="creative-image"] img',
+                            
+                            // Priority 4: Other Google syndication images
                             'img[src*="googlesyndication.com"]',
-                            'img[src*="archive/simad"]',
-                            'img[src*="simad"]'
+                            'img[src*="archive/simad"]'
                         ];
+                        
                         for (const sel of imageSelectors) {
                             try {
                                 const img = root.querySelector(sel);
                                 if (img && img.src && img.src.startsWith('http')) {
-                                    data.imageUrl = img.src;
-                                    break;
+                                    // Validate it's a real image URL
+                                    const imgSrc = img.src.trim();
+                                    
+                                    // Prioritize tpc.googlesyndication.com/simgad/ URLs
+                                    if (imgSrc.includes('tpc.googlesyndication.com/simgad/') || 
+                                        imgSrc.includes('googlesyndication.com/simgad/')) {
+                                        data.imageUrl = imgSrc;
+                                        break; // Found the target image, stop searching
+                                    }
+                                    
+                                    // Accept other valid image URLs if we haven't found one yet
+                                    if (!data.imageUrl && imgSrc.match(/\.(jpg|jpeg|png|gif|webp)/i)) {
+                                        data.imageUrl = imgSrc;
+                                        // Don't break - continue searching for tpc.googlesyndication.com/simgad/ URL
+                                    }
                                 }
                             } catch (e) { }
                         }
+                        
+                        // If we found a non-simgad image but want to prioritize simgad URLs, keep searching
+                        // But if we already have a simgad URL, we're done
 
                         // =====================================================
                         // ULTRA-PRECISE STORE LINK EXTRACTOR
@@ -937,6 +972,68 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             }
 
             // =====================================================
+            // FALLBACK FOR IMAGE URL (Main Page - for Image Ads)
+            // Search main page for tpc.googlesyndication.com/simgad/ URLs
+            // =====================================================
+            if (result.imageUrl === 'NOT_FOUND') {
+                const mainImageUrl = await page.evaluate(() => {
+                    // Priority: Find image in ad content area first
+                    const adContentArea = document.querySelector('#portrait-landscape-phone, .creative-container, .ad-preview, [class*="creative"], #landscape-view, #portrait-view');
+                    
+                    const imageSelectors = [
+                        // Specific image ad selectors
+                        '#landscape-image',
+                        '#portrait-image',
+                        'img#landscape-image',
+                        'img#portrait-image',
+                        '.landscape-image img',
+                        '.portrait-image img',
+                        '.landscape-card img',
+                        '.portrait-card img',
+                        
+                        // Google syndication image URLs (priority)
+                        'img[src*="tpc.googlesyndication.com/simgad"]',
+                        'img[src*="googlesyndication.com/simgad"]',
+                        'img[src*="simgad"]',
+                        
+                        // General ad images
+                        '.html-container img',
+                        '.creative-container img',
+                        '.ad-image img'
+                    ];
+                    
+                    // Search in ad content area first
+                    const searchRoot = adContentArea || document;
+                    
+                    for (const sel of imageSelectors) {
+                        try {
+                            const img = searchRoot.querySelector(sel);
+                            if (img && img.src && img.src.startsWith('http')) {
+                                const imgSrc = img.src.trim();
+                                
+                                // Prioritize tpc.googlesyndication.com/simgad/ URLs
+                                if (imgSrc.includes('tpc.googlesyndication.com/simgad/') || 
+                                    imgSrc.includes('googlesyndication.com/simgad/')) {
+                                    return imgSrc;
+                                }
+                                
+                                // Accept other valid image URLs if we haven't found simgad yet
+                                if (imgSrc.match(/\.(jpg|jpeg|png|gif|webp)/i) || imgSrc.includes('googlesyndication.com')) {
+                                    return imgSrc;
+                                }
+                            }
+                        } catch (e) { }
+                    }
+                    
+                    return null;
+                });
+                if (mainImageUrl) {
+                    result.imageUrl = mainImageUrl;
+                    console.log(`  🖼️ Found Image URL (main page): ${mainImageUrl.substring(0, 60)}...`);
+                }
+            }
+
+            // =====================================================
             // FALLBACK FOR SUBTITLE/HEADLINE (Main Page)
             // For text ads, headline is in div.c54Vcb-vmv8lc on main page
             // =====================================================
@@ -1144,6 +1241,34 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     console.log(`  ⚠️ HTML content search failed: ${e.message}`);
                 }
             }
+
+            // =====================================================
+            // FALLBACK FOR IMAGE URL (HTML Content - for Image Ads)
+            // Search raw HTML for tpc.googlesyndication.com/simgad/ URLs
+            // =====================================================
+            if (result.imageUrl === 'NOT_FOUND') {
+                console.log(`  🔍 Searching HTML content for image URL...`);
+                try {
+                    const allContent = await page.content();
+                    
+                    // Look for tpc.googlesyndication.com/simgad/ URLs in HTML
+                    const simgadMatches = allContent.match(/https?:\/\/tpc\.googlesyndication\.com\/simgad\/([0-9]+)/g);
+                    if (simgadMatches && simgadMatches.length > 0) {
+                        // Use the first match (should be the ad image)
+                        result.imageUrl = simgadMatches[0];
+                        console.log(`  🖼️ Found Image URL (HTML content): ${result.imageUrl.substring(0, 60)}...`);
+                    } else {
+                        // Fallback: Look for any googlesyndication.com/simgad/ pattern
+                        const googlesyndicationMatches = allContent.match(/https?:\/\/[^"'\s]+googlesyndication\.com\/simgad\/[^"'\s]+/g);
+                        if (googlesyndicationMatches && googlesyndicationMatches.length > 0) {
+                            result.imageUrl = googlesyndicationMatches[0];
+                            console.log(`  🖼️ Found Image URL (HTML content): ${result.imageUrl.substring(0, 60)}...`);
+                        }
+                    }
+                } catch (e) {
+                    console.log(`  ⚠️ HTML image URL search failed: ${e.message}`);
+                }
+            }
         }
 
         // Video ID is no longer requested
@@ -1158,68 +1283,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     }
 }
 
-async function extractWithRetry(item, browser) {
-    let bestResult = null;
-
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        if (attempt > 1) console.log(`  🔄 Retry ${attempt}/${MAX_RETRIES}...`);
-
-        const data = await extractAllInOneVisit(
-            item.url,
-            browser,
-            item.needsMetadata,
-            item.needsVideoId,
-            item.existingStoreLink,
-            attempt
-        );
-
-        if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
-
-        // Update bestResult with any non-NOT_FOUND data we find
-        if (!bestResult) {
-            bestResult = { ...data };
-        } else {
-            // Merge results: keep what we already found if new attempt returns NOT_FOUND
-            if (data.advertiserName !== 'NOT_FOUND' && data.advertiserName !== 'SKIP') bestResult.advertiserName = data.advertiserName;
-            if (data.appName !== 'NOT_FOUND' && data.appName !== 'SKIP') bestResult.appName = data.appName;
-            if (data.storeLink !== 'NOT_FOUND' && data.storeLink !== 'SKIP') bestResult.storeLink = data.storeLink;
-            if (data.videoId !== 'NOT_FOUND' && data.videoId !== 'SKIP') bestResult.videoId = data.videoId;
-            if (data.appSubtitle !== 'NOT_FOUND' && data.appSubtitle !== 'SKIP') bestResult.appSubtitle = data.appSubtitle;
-            if (data.imageUrl !== 'NOT_FOUND' && data.imageUrl !== 'SKIP') bestResult.imageUrl = data.imageUrl;
-        }
-
-        // If all fields are SKIP, return immediately
-        if (data.storeLink === 'SKIP' && data.appName === 'SKIP' && data.videoId === 'SKIP') {
-            return bestResult;
-        }
-
-        // Determine if we have a valid store link
-        const currentStoreLink = (bestResult.storeLink && bestResult.storeLink !== 'SKIP' && bestResult.storeLink !== 'NOT_FOUND')
-            ? bestResult.storeLink
-            : item.existingStoreLink;
-
-        const isPlayStore = currentStoreLink && currentStoreLink.includes('play.google.com');
-        const isAppleStore = currentStoreLink && currentStoreLink.includes('apps.apple.com');
-
-        // Success criteria (METADATA ONLY):
-        const hasName = bestResult.appName && bestResult.appName !== 'NOT_FOUND' && bestResult.appName !== 'SKIP';
-        const hasLink = bestResult.storeLink && bestResult.storeLink !== 'NOT_FOUND' && bestResult.storeLink !== 'SKIP';
-        const hasSubtitle = bestResult.appSubtitle && bestResult.appSubtitle !== 'NOT_FOUND' && bestResult.appSubtitle !== 'SKIP';
-        const hasImage = bestResult.imageUrl && bestResult.imageUrl !== 'NOT_FOUND' && bestResult.imageUrl !== 'SKIP';
-
-        const success = !item.needsMetadata || (hasName && hasLink);
-
-        if (success) {
-            return bestResult;
-        } else {
-            console.log(`  ⚠️ Attempt ${attempt} result: Success=${success}`);
-        }
-
-        await randomDelay(1500, 3000);
-    }
-
-    return bestResult || { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
-}
 
 // ============================================
 // MAIN EXECUTION
@@ -1323,7 +1386,13 @@ async function extractWithRetry(item, browser) {
                     // CRITICAL: Preserve rowIndex from original item
                     const originalRowIndex = item.rowIndex;
                     console.log(`  🚀 Row ${originalRowIndex + 1}: Starting ${item.url.substring(0, 40)}...`);
-                    const data = await extractWithRetry(item, browser);
+                    const data = await extractAllInOneVisit(
+                        item.url,
+                        browser,
+                        item.needsMetadata,
+                        item.needsVideoId,
+                        item.existingStoreLink
+                    );
 
                     // Ensure rowIndex is explicitly set from the original item
                     return {
