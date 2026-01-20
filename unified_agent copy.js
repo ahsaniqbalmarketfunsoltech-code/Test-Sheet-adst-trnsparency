@@ -22,6 +22,11 @@ const { google } = require('googleapis');
 const fs = require('fs');
 
 // ============================================
+// LOAD AD TYPES CONFIGURATION
+// ============================================
+const AD_TYPES_CONFIG = JSON.parse(fs.readFileSync('./ad_types_config.json', 'utf8'));
+
+// ============================================
 // CONFIGURATION
 // ============================================
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
@@ -259,8 +264,209 @@ async function batchWriteToSheet(sheets, updates) {
 }
 
 // ============================================
+// AD TYPE DETECTION & EXTRACTION HELPERS
+// ============================================
+async function detectAdType(page) {
+    const adType = await page.evaluate((config) => {
+        // Check for Image Ad first (most specific)
+        const imageView = document.querySelector('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
+        const imageElement = imageView ? imageView.querySelector('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image') : null;
+        if (imageView && imageElement && imageElement.src && imageElement.src.includes('simgad')) {
+            return 'image_ad';
+        }
+        
+        // Check for Text Ad
+        const textAdElements = document.querySelectorAll('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"], [class*="vmv8lc"]');
+        if (textAdElements.length > 0) {
+            // Verify it's visible and substantial
+            for (const el of textAdElements) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0 && rect.width > 50 && rect.height > 20) {
+                    return 'text_ad';
+                }
+            }
+        }
+        
+        return 'unknown';
+    }, AD_TYPES_CONFIG);
+    
+    return adType;
+}
+
+async function extractImageAdData(page, config) {
+    const result = {
+        imageUrl: 'NOT_FOUND',
+        appName: 'NOT_FOUND',
+        appSubtitle: 'NOT_FOUND',
+        storeLink: 'NOT_FOUND'
+    };
+    
+    try {
+        // Step 1: Find visible ad container
+        const adViewContainer = await page.$('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
+        if (!adViewContainer) return result;
+        
+        // Step 2: Find image element inside container
+        const imageElement = await adViewContainer.$('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image');
+        if (!imageElement) return result;
+        
+        // Step 3: Hover on image element
+        await imageElement.hover();
+        await sleep(500);
+        
+        // Step 4: Extract all data from hovered container
+        const extractedData = await page.evaluate((config) => {
+            const data = {
+                imageUrl: null,
+                appName: null,
+                appHeadline: null,
+                packageName: null
+            };
+            
+            // Find container
+            const container = document.querySelector('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
+            if (!container) return data;
+            
+            // Extract Image URL
+            const img = container.querySelector('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image');
+            if (img && img.src) {
+                data.imageUrl = img.src.trim();
+            }
+            
+            // Extract App Name
+            const appNameEl = container.querySelector('#landscape-app-title, #portrait-app-title, .landscape-app-title, .portrait-app-title, span.landscape-app-title, span.portrait-app-title');
+            if (appNameEl) {
+                data.appName = (appNameEl.innerText || appNameEl.textContent || '').trim();
+            }
+            
+            // Extract App Headline
+            const headlineEl = container.querySelector('#landscape-app-text, #portrait-app-text, .landscape-app-text, .portrait-app-text, div.landscape-app-text, div.portrait-app-text');
+            if (headlineEl) {
+                data.appHeadline = (headlineEl.innerText || headlineEl.textContent || '').trim();
+            }
+            
+            // Extract Package Name from JavaScript data
+            const pageContent = document.documentElement.innerHTML;
+            const patterns = [
+                /appId\s*[:=]\s*['"](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)['"]/i,
+                /adData[^}]*appId\s*[:=]\s*['"](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)['"]/i
+            ];
+            
+            for (const pattern of patterns) {
+                const match = pageContent.match(pattern);
+                if (match && match[1]) {
+                    data.packageName = match[1];
+                    break;
+                }
+            }
+            
+            return data;
+        }, config);
+        
+        if (extractedData.imageUrl) result.imageUrl = extractedData.imageUrl;
+        if (extractedData.appName) result.appName = extractedData.appName;
+        if (extractedData.appHeadline) result.appSubtitle = extractedData.appHeadline;
+        if (extractedData.packageName) {
+            result.storeLink = `https://play.google.com/store/apps/details?id=${extractedData.packageName}`;
+        }
+        
+        console.log(`  🖼️ Image Ad - URL: ${result.imageUrl.substring(0, 50)}... | Name: ${result.appName} | Headline: ${result.appSubtitle}`);
+        
+    } catch (e) {
+        console.log(`  ⚠️ Image ad extraction failed: ${e.message}`);
+    }
+    
+    return result;
+}
+
+async function extractTextAdData(page, config) {
+    const result = {
+        appName: 'NOT_FOUND',
+        appSubtitle: 'NOT_FOUND',
+        storeLink: 'NOT_FOUND'
+    };
+    
+    try {
+        // Step 1: Find text ad element
+        const textAdElement = await page.$('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"], [role="link"]');
+        if (!textAdElement) return result;
+        
+        // Step 2: Hover on text ad element
+        await textAdElement.hover();
+        await sleep(500);
+        
+        // Step 3: Extract all data
+        const extractedData = await page.evaluate((config) => {
+            const data = {
+                appName: null,
+                appHeadline: null,
+                packageName: null
+            };
+            
+            // Extract App Name from span
+            const spanElements = document.querySelectorAll('span');
+            for (const span of spanElements) {
+                const text = (span.innerText || span.textContent || '').trim();
+                if (text && text.length > 5 && text.length < 150 && 
+                    !text.toLowerCase().includes('install') &&
+                    !text.toLowerCase().includes('download')) {
+                    const rect = span.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        data.appName = text;
+                        break;
+                    }
+                }
+            }
+            
+            // Extract App Headline from .cS4Vcb-vnv8ic
+            const headlineEl = document.querySelector('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"]');
+            if (headlineEl) {
+                data.appHeadline = (headlineEl.innerText || headlineEl.textContent || '').trim();
+            }
+            
+            // Extract Package Name from JavaScript data
+            const pageContent = document.documentElement.innerHTML;
+            const patterns = [
+                /AF_dataServiceRequests[^]]*["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)["']/i,
+                /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){2,})["']/gi
+            ];
+            
+            for (const pattern of patterns) {
+                const matches = pageContent.match(pattern);
+                if (matches) {
+                    for (const match of matches) {
+                        const pkg = match.replace(/["']/g, '');
+                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                            !pkg.includes('google') && !pkg.includes('android')) {
+                            data.packageName = pkg;
+                            break;
+                        }
+                    }
+                    if (data.packageName) break;
+                }
+            }
+            
+            return data;
+        }, config);
+        
+        if (extractedData.appName) result.appName = extractedData.appName;
+        if (extractedData.appHeadline) result.appSubtitle = extractedData.appHeadline;
+        if (extractedData.packageName) {
+            result.storeLink = `https://play.google.com/store/apps/details?id=${extractedData.packageName}`;
+        }
+        
+        console.log(`  📝 Text Ad - Name: ${result.appName} | Headline: ${result.appSubtitle} | Link: ${result.storeLink.substring(0, 50)}...`);
+        
+    } catch (e) {
+        console.log(`  ⚠️ Text ad extraction failed: ${e.message}`);
+    }
+    
+    return result;
+}
+
+// ============================================
 // UNIFIED EXTRACTION - ONE VISIT PER URL
-// Both metadata + video ID extracted on same page
+// Database-driven extraction based on ad type
 // ============================================
 async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink) {
     const page = await browser.newPage();
@@ -552,57 +758,23 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             await sleep(randomPause);
         }
 
-        // =====================================================
-        // PHASE 1: METADATA EXTRACTION
-        // =====================================================
-        let mainPageInfo = null;
-        if (needsMetadata) {
-            console.log(`  📊 Extracting metadata...`);
+        // OLD EXTRACTION CODE REMOVED - Now using database-driven approach above
+        // Video ID is no longer requested
+        result.videoId = 'NOT_FOUND';
 
-            mainPageInfo = await page.evaluate(() => {
-                const getSafeText = (sel) => {
-                    const el = document.querySelector(sel);
-                    if (!el) return null;
-                    const text = el.innerText.trim();
-                    const blacklistWords = ['ad details', 'google ads', 'transparency center', 'about this ad'];
-                    if (!text || blacklistWords.some(word => text.toLowerCase().includes(word)) || text.length < 2) return null;
-                    return text;
-                };
+        await page.close();
+        return result;
+    } catch (err) {
+        console.error(`  ❌ Error: ${err.message}`);
+        await page.close();
+        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', videoId: 'ERROR' };
+    }
+}
 
-                const advertiserSelectors = [
-                    '.advertiser-name',
-                    '.advertiser-name-container',
-                    'h1',
-                    '.creative-details-page-header-text',
-                    '.ad-details-heading'
-                ];
 
-                let advertiserName = null;
-                for (const sel of advertiserSelectors) {
-                    advertiserName = getSafeText(sel);
-                    if (advertiserName) break;
-                }
-
-                const checkVideo = () => {
-                    const videoEl = document.querySelector('video');
-                    if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
-                    return document.body.innerText.includes('Format: Video');
-                };
-
-                return {
-                    advertiserName: advertiserName || 'NOT_FOUND',
-                    blacklist: advertiserName ? advertiserName.toLowerCase() : '',
-                    isVideo: checkVideo()
-                };
-            });
-
-            const blacklistName = mainPageInfo.blacklist;
-            result.advertiserName = mainPageInfo.advertiserName;
-
-            const frames = page.frames();
-            for (const frame of frames) {
-                try {
-                    const frameData = await frame.evaluate((blacklist) => {
+// ============================================
+// MAIN EXECUTION
+// ============================================
                         const data = { appName: null, storeLink: null, isVideo: false, appSubtitle: null, imageUrl: null };
                         const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
@@ -1357,6 +1529,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         await page.close();
         return result;
+        */
     } catch (err) {
         console.error(`  ❌ Error: ${err.message}`);
         await page.close();

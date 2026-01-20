@@ -1,0 +1,131 @@
+{
+  "text_ad": {
+    "detection": {
+      "selectors": [
+        ".cS4Vcb-vnv8ic",
+        "div.cS4Vcb-vnv8ic",
+        "[class*='cS4Vcb']",
+        "[class*='vmv8lc']"
+      ],
+      "description": "Text ads have subtitle/headline elements with classes like cS4Vcb-vnv8ic"
+    },
+    "hover_required": true,
+    "hover_target": {
+      "description": "Hover on the visible text ad preview container to highlight correct element",
+      "selectors": [
+        ".cS4Vcb-vnv8ic",
+        "div[class*='cS4Vcb']",
+        "[role='link']"
+      ]
+    },
+    "extraction": {
+      "app_name": {
+        "source": "span",
+        "description": "Extract from span element after hovering",
+        "selectors": [
+          "span",
+          "[class*='headline']",
+          "[class*='title']"
+        ],
+        "example": "Recover Deleted Messages | Try to Recover chat"
+      },
+      "app_headline": {
+        "source": "div",
+        "description": "Extract from div element with class cS4Vcb-vnv8ic after hovering",
+        "selectors": [
+          ".cS4Vcb-vnv8ic",
+          "div.cS4Vcb-vnv8ic",
+          "[class*='cS4Vcb']"
+        ],
+        "example": "Try to Restore Old Chat"
+      },
+      "package_name": {
+        "source": "javascript_data",
+        "description": "Extract package name from JavaScript data (AF_dataServiceRequests) or meta tags after hovering",
+        "patterns": [
+          "com\\.[a-z0-9_]+(\\.[a-z0-9_]+)+",
+          "AF_dataServiceRequests.*\"([a-z][a-z0-9_]*\\.[a-z0-9_]+(\\.[a-z0-9_]+)+)\""
+        ],
+        "example": "com.datarecovery.business.restoredeletedmessages"
+      },
+      "store_link": {
+        "construction": "https://play.google.com/store/apps/details?id={package_name}",
+        "description": "Build Play Store URL by combining base URL + extracted package name"
+      }
+    },
+    "extraction_method": "hover_and_extract_from_javascript"
+  },
+  "image_ad": {
+    "detection": {
+      "selectors": [
+        "#landscape-view",
+        "#portrait-view",
+        ".landscape-view",
+        ".portrait-view"
+      ],
+      "description": "Image ads have landscape-view or portrait-view containers"
+    },
+    "hover_required": true,
+    "hover_target": {
+      "description": "Hover on #landscape-image or #portrait-image inside the visible ad container to get correct data",
+      "selectors": [
+        "#landscape-image",
+        "#portrait-image",
+        "img#landscape-image",
+        "img#portrait-image"
+      ]
+    },
+    "extraction": {
+      "image_url": {
+        "source": "img src",
+        "description": "Extract from img element src attribute after hovering on image",
+        "selectors": [
+          "#landscape-image",
+          "#portrait-image"
+        ],
+        "pattern": "tpc.googlesyndication.com/simgad/",
+        "example": "https://tpc.googlesyndication.com/simgad/1439182..."
+      },
+      "app_name": {
+        "source": "span",
+        "description": "Extract from app title element after hovering on image",
+        "selectors": [
+          "#landscape-app-title",
+          "#portrait-app-title",
+          ".landscape-app-title",
+          ".portrait-app-title",
+          "span.landscape-app-title",
+          "span.portrait-app-title"
+        ],
+        "example": "Flight Tracker - Flight Radar"
+      },
+      "app_headline": {
+        "source": "div",
+        "description": "Extract from app text/headline element after hovering on image",
+        "selectors": [
+          "#landscape-app-text",
+          "#portrait-app-text",
+          ".landscape-app-text",
+          ".portrait-app-text",
+          "div.landscape-app-text",
+          "div.portrait-app-text"
+        ],
+        "example": "View planes online"
+      },
+      "package_name": {
+        "source": "javascript_data",
+        "description": "Extract package name from JavaScript data (adData object) after hovering on image",
+        "patterns": [
+          "appId.*['\"](com\\.[a-z0-9_]+(\\.[a-z0-9_]+)+)['\"]",
+          "adData.*appId.*['\"]([a-z][a-z0-9_]*\\.[a-z0-9_]+(\\.[a-z0-9_]+)+)['\"]"
+        ],
+        "example": "com.uae.airport.flightsstatus"
+      },
+      "store_link": {
+        "construction": "https://play.google.com/store/apps/details?id={package_name}",
+        "description": "Build Play Store URL by combining base URL + extracted package name"
+      }
+    },
+    "extraction_method": "hover_on_image_and_extract_all_data"
+  }
+}
