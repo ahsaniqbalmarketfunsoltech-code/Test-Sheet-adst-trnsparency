@@ -567,6 +567,86 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         }
 
                         // =====================================================
+                        // EXTRACT STORE LINK FROM META DATA-ASOCH-META
+                        // Priority method: Extract from <meta data-asoch-meta> tags
+                        // =====================================================
+                        const extractFromMetaTag = () => {
+                            try {
+                                const metaTags = root.querySelectorAll('meta[data-asoch-meta]');
+                                for (const meta of metaTags) {
+                                    const metaData = meta.getAttribute('data-asoch-meta');
+                                    if (!metaData) continue;
+                                    
+                                    try {
+                                        // Parse the JSON data
+                                        const parsed = JSON.parse(metaData);
+                                        
+                                        // Look for "ad0" key which contains the URL array
+                                        if (Array.isArray(parsed) && parsed.length > 0) {
+                                            const firstArray = parsed[0];
+                                            if (Array.isArray(firstArray)) {
+                                                // Find the "ad0" entry
+                                                for (const entry of firstArray) {
+                                                    if (Array.isArray(entry) && entry.length > 0 && entry[0] === 'ad0') {
+                                                        // The URL is typically at index 1 of the ad0 array
+                                                        if (entry.length > 1 && entry[1]) {
+                                                            const urlString = entry[1];
+                                                            
+                                                            // Extract Play Store URL from adurl parameter
+                                                            const adurlMatch = urlString.match(/[?&]adurl=([^&\s]+)/i);
+                                                            if (adurlMatch && adurlMatch[1]) {
+                                                                const decodedUrl = decodeURIComponent(adurlMatch[1]);
+                                                                // Check if it's a Play Store URL
+                                                                if (decodedUrl.includes('play.google.com/store/apps/details')) {
+                                                                    // Extract package name from URL
+                                                                    const packageMatch = decodedUrl.match(/[?&]id=([a-zA-Z0-9._]+)/);
+                                                                    if (packageMatch && packageMatch[1]) {
+                                                                        const packageName = packageMatch[1];
+                                                                        // Construct clean Play Store URL
+                                                                        return `https://play.google.com/store/apps/details?id=${packageName}`;
+                                                                    }
+                                                                    // Return the decoded URL if package extraction fails
+                                                                    return decodedUrl;
+                                                                }
+                                                            }
+                                                            
+                                                            // Also try to extract package name directly from the URL string
+                                                            const packageMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|id=([a-zA-Z0-9._]+)/);
+                                                            if (packageMatch) {
+                                                                const packageName = packageMatch[1] || packageMatch[2];
+                                                                if (packageName) {
+                                                                    return `https://play.google.com/store/apps/details?id=${packageName}`;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        // If JSON parsing fails, try regex extraction directly from the attribute
+                                        const packageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|id=([a-zA-Z0-9._]+)/);
+                                        if (packageMatch) {
+                                            const packageName = packageMatch[1] || packageMatch[2];
+                                            if (packageName && packageName.length > 3) {
+                                                return `https://play.google.com/store/apps/details?id=${packageName}`;
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                // Silently fail and try other methods
+                            }
+                            return null;
+                        };
+                        
+                        // Try extracting from meta tag first (highest priority)
+                        const metaStoreLink = extractFromMetaTag();
+                        if (metaStoreLink) {
+                            data.storeLink = metaStoreLink;
+                        }
+
+                        // =====================================================
                         // ULTRA-PRECISE STORE LINK EXTRACTOR
                         // Only accepts REAL Play Store / App Store links
                         // =====================================================
@@ -658,8 +738,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                             }
                         }
 
+                        // If we already found store link from meta tag, use it
+                        if (data.storeLink) {
+                            // Store link already found from meta tag, continue
+                        }
                         // Backup: Install button for link
-                        if (data.appName && !data.storeLink) {
+                        else if (data.appName && !data.storeLink) {
                             const installSels = [
                                 'a[data-asoch-targets*="ochButton"]',
                                 'a[data-asoch-targets*="Install" i]',
@@ -724,6 +808,88 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         // DON'T break - continue looking for a frame with BOTH name+link
                     }
                 } catch (e) { }
+            }
+
+            // Extract store link from meta tags on main page (if not found in iframes)
+            if (needsMetadata && result.storeLink === 'NOT_FOUND') {
+                try {
+                    const metaStoreLink = await page.evaluate(() => {
+                        try {
+                            const metaTags = document.querySelectorAll('meta[data-asoch-meta]');
+                            for (const meta of metaTags) {
+                                const metaData = meta.getAttribute('data-asoch-meta');
+                                if (!metaData) continue;
+                                
+                                try {
+                                    // Parse the JSON data
+                                    const parsed = JSON.parse(metaData);
+                                    
+                                    // Look for "ad0" key which contains the URL array
+                                    if (Array.isArray(parsed) && parsed.length > 0) {
+                                        const firstArray = parsed[0];
+                                        if (Array.isArray(firstArray)) {
+                                            // Find the "ad0" entry
+                                            for (const entry of firstArray) {
+                                                if (Array.isArray(entry) && entry.length > 0 && entry[0] === 'ad0') {
+                                                    // The URL is typically at index 1 of the ad0 array
+                                                    if (entry.length > 1 && entry[1]) {
+                                                        const urlString = entry[1];
+                                                        
+                                                        // Extract Play Store URL from adurl parameter
+                                                        const adurlMatch = urlString.match(/[?&]adurl=([^&\s]+)/i);
+                                                        if (adurlMatch && adurlMatch[1]) {
+                                                            const decodedUrl = decodeURIComponent(adurlMatch[1]);
+                                                            // Check if it's a Play Store URL
+                                                            if (decodedUrl.includes('play.google.com/store/apps/details')) {
+                                                                // Extract package name from URL
+                                                                const packageMatch = decodedUrl.match(/[?&]id=([a-zA-Z0-9._]+)/);
+                                                                if (packageMatch && packageMatch[1]) {
+                                                                    const packageName = packageMatch[1];
+                                                                    // Construct clean Play Store URL
+                                                                    return `https://play.google.com/store/apps/details?id=${packageName}`;
+                                                                }
+                                                                // Return the decoded URL if package extraction fails
+                                                                return decodedUrl;
+                                                            }
+                                                        }
+                                                        
+                                                        // Also try to extract package name directly from the URL string
+                                                        const packageMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|id=([a-zA-Z0-9._]+)/);
+                                                        if (packageMatch) {
+                                                            const packageName = packageMatch[1] || packageMatch[2];
+                                                            if (packageName) {
+                                                                return `https://play.google.com/store/apps/details?id=${packageName}`;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    // If JSON parsing fails, try regex extraction directly from the attribute
+                                    const packageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|id=([a-zA-Z0-9._]+)/);
+                                    if (packageMatch) {
+                                        const packageName = packageMatch[1] || packageMatch[2];
+                                        if (packageName && packageName.length > 3) {
+                                            return `https://play.google.com/store/apps/details?id=${packageName}`;
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            // Silently fail
+                        }
+                        return null;
+                    });
+                    
+                    if (metaStoreLink) {
+                        result.storeLink = metaStoreLink;
+                        console.log(`  ✓ Found store link from meta tag: ${result.storeLink.substring(0, 60)}...`);
+                    }
+                } catch (e) {
+                    // Silently fail and continue
+                }
             }
 
             // Final fallback from Meta/Title
