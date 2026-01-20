@@ -208,7 +208,7 @@ async function batchWriteToSheet(sheets, updates) {
             return; // Skip this row entirely
         }
 
-        console.log(`  📝 Writing data to Row ${rowNum} (rowIndex=${rowIndex})`);
+            console.log(`  📝 Writing data to Row ${rowNum} (rowIndex=${rowIndex})`);
 
         // Only write advertiser name if it's valid
         if (isValidValue(advertiserName)) {
@@ -242,8 +242,8 @@ async function batchWriteToSheet(sheets, updates) {
 
         // Only write timestamp if we wrote at least one valid field
         if (data.length > 0) {
-            const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
-            data.push({ range: `'${SHEET_NAME}'!M${rowNum}`, values: [[timestamp]] });
+        const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
+        data.push({ range: `'${SHEET_NAME}'!M${rowNum}`, values: [[timestamp]] });
         }
     });
 
@@ -267,21 +267,75 @@ async function batchWriteToSheet(sheets, updates) {
 // AD TYPE DETECTION & EXTRACTION HELPERS
 // ============================================
 async function detectAdType(page) {
+    // Wait a bit for elements to load
+    await sleep(1000);
+    
     const adType = await page.evaluate((config) => {
         // Check for Image Ad first (most specific)
-        const imageView = document.querySelector('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
-        const imageElement = imageView ? imageView.querySelector('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image') : null;
-        if (imageView && imageElement && imageElement.src && imageElement.src.includes('simgad')) {
-            return 'image_ad';
+        // Look for landscape-view or portrait-view containers
+        const imageViewSelectors = ['#landscape-view', '#portrait-view', '.landscape-view', '.portrait-view'];
+        let imageView = null;
+        for (const sel of imageViewSelectors) {
+            imageView = document.querySelector(sel);
+            if (imageView) break;
         }
         
-        // Check for Text Ad
-        const textAdElements = document.querySelectorAll('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"], [class*="vmv8lc"]');
-        if (textAdElements.length > 0) {
-            // Verify it's visible and substantial
-            for (const el of textAdElements) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0 && rect.width > 50 && rect.height > 20) {
+        if (imageView) {
+            // Check if there's an image element inside (don't require src to include 'simgad' for detection)
+            const imageElement = imageView.querySelector('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image, img');
+            if (imageElement) {
+                // Check if it's visible
+                const rect = imageElement.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    return 'image_ad';
+                }
+            }
+        }
+        
+        // Also check for image elements directly (in case container structure is different)
+        const directImageSelectors = ['#landscape-image', '#portrait-image', 'img#landscape-image', 'img#portrait-image'];
+        for (const sel of directImageSelectors) {
+            const img = document.querySelector(sel);
+            if (img) {
+                const rect = img.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0 && rect.width > 50 && rect.height > 50) {
+                    return 'image_ad';
+                }
+            }
+        }
+        
+        // Check for Text Ad - use selectors from config
+        const textAdSelectors = [
+            '.cS4Vcb-vnv8ic',
+            'div.cS4Vcb-vnv8ic',
+            '[class*="cS4Vcb"]',
+            '[class*="vmv8lc"]',
+            '[class*="c54Vcb"]'  // Alternative class variant
+        ];
+        
+        for (const sel of textAdSelectors) {
+            const elements = document.querySelectorAll(sel);
+            if (elements.length > 0) {
+                // Check if any element is visible and substantial
+                for (const el of elements) {
+                    const rect = el.getBoundingClientRect();
+                    const text = (el.innerText || el.textContent || '').trim();
+                    // More lenient check - just needs to be visible and have some text
+                    if (rect.width > 0 && rect.height > 0 && text.length > 3) {
+                        return 'text_ad';
+                    }
+                }
+            }
+        }
+        
+        // Fallback: Check for any div with text that might be a text ad
+        const allDivs = document.querySelectorAll('div[class*="cS4Vcb"], div[class*="vmv8lc"], div[class*="c54Vcb"]');
+        for (const div of allDivs) {
+            const rect = div.getBoundingClientRect();
+            const text = (div.innerText || div.textContent || '').trim();
+            if (rect.width > 0 && rect.height > 0 && text.length > 5 && text.length < 200) {
+                // Check if it's not a navigation element
+                if (!div.closest('nav') && !div.closest('header') && !div.closest('footer')) {
                     return 'text_ad';
                 }
             }
@@ -289,6 +343,23 @@ async function detectAdType(page) {
         
         return 'unknown';
     }, AD_TYPES_CONFIG);
+    
+    // Add debug logging
+    if (adType === 'unknown') {
+        const debugInfo = await page.evaluate(() => {
+            return {
+                hasLandscapeView: !!document.querySelector('#landscape-view, .landscape-view'),
+                hasPortraitView: !!document.querySelector('#portrait-view, .portrait-view'),
+                hasLandscapeImage: !!document.querySelector('#landscape-image'),
+                hasPortraitImage: !!document.querySelector('#portrait-image'),
+                textAdElements: document.querySelectorAll('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"], [class*="vmv8lc"]').length,
+                allDivsWithC: Array.from(document.querySelectorAll('div[class*="c"]')).slice(0, 5).map(d => d.className)
+            };
+        });
+        console.log(`  🔍 Debug - Image containers: landscape=${debugInfo.hasLandscapeView}, portrait=${debugInfo.hasPortraitView}`);
+        console.log(`  🔍 Debug - Image elements: landscape=${debugInfo.hasLandscapeImage}, portrait=${debugInfo.hasPortraitImage}`);
+        console.log(`  🔍 Debug - Text ad elements found: ${debugInfo.textAdElements}`);
+    }
     
     return adType;
 }
@@ -302,13 +373,49 @@ async function extractImageAdData(page, config) {
     };
     
     try {
-        // Step 1: Find visible ad container
-        const adViewContainer = await page.$('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
-        if (!adViewContainer) return result;
+        // Step 1: Find visible ad container (try multiple selectors)
+        let adViewContainer = await page.$('#landscape-view, #portrait-view');
+        if (!adViewContainer) {
+            adViewContainer = await page.$('.landscape-view, .portrait-view');
+        }
+        if (!adViewContainer) {
+            // Try finding container by looking for image element first
+            const containerSelector = await page.evaluate(() => {
+                const img = document.querySelector('#landscape-image, #portrait-image');
+                if (img) {
+                    const container = img.closest('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
+                    if (container) {
+                        // Return a unique selector for this container
+                        if (container.id) return `#${container.id}`;
+                        if (container.className) {
+                            const classes = container.className.split(' ').filter(c => c.includes('landscape') || c.includes('portrait'));
+                            if (classes.length > 0) return `.${classes[0]}`;
+                        }
+                    }
+                }
+                return null;
+            });
+            if (containerSelector) {
+                adViewContainer = await page.$(containerSelector);
+            }
+        }
+        if (!adViewContainer) {
+            console.log(`  ⚠️ Image ad container not found`);
+            return result;
+        }
         
-        // Step 2: Find image element inside container
-        const imageElement = await adViewContainer.$('#landscape-image, #portrait-image, img#landscape-image, img#portrait-image');
-        if (!imageElement) return result;
+        // Step 2: Find image element inside container (try multiple selectors)
+        let imageElement = await adViewContainer.$('#landscape-image, #portrait-image');
+        if (!imageElement) {
+            imageElement = await adViewContainer.$('img#landscape-image, img#portrait-image');
+        }
+        if (!imageElement) {
+            imageElement = await adViewContainer.$('img');
+        }
+        if (!imageElement) {
+            console.log(`  ⚠️ Image element not found in container`);
+            return result;
+        }
         
         // Step 3: Hover on image element
         await imageElement.hover();
@@ -387,9 +494,32 @@ async function extractTextAdData(page, config) {
     };
     
     try {
-        // Step 1: Find text ad element
-        const textAdElement = await page.$('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"], [role="link"]');
-        if (!textAdElement) return result;
+        // Step 1: Find text ad element (try multiple selectors)
+        let textAdElement = await page.$('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic');
+        if (!textAdElement) {
+            textAdElement = await page.$('[class*="cS4Vcb"]');
+        }
+        if (!textAdElement) {
+            textAdElement = await page.$('[class*="vmv8lc"]');
+        }
+        if (!textAdElement) {
+            textAdElement = await page.$('[class*="c54Vcb"]');
+        }
+        if (!textAdElement) {
+            // Last resort: try role="link" but only if it has text
+            const links = await page.$$('[role="link"]');
+            for (const link of links) {
+                const text = await link.evaluate(el => (el.innerText || el.textContent || '').trim());
+                if (text && text.length > 5 && text.length < 200) {
+                    textAdElement = link;
+                    break;
+                }
+            }
+        }
+        if (!textAdElement) {
+            console.log(`  ⚠️ Text ad element not found`);
+            return result;
+        }
         
         // Step 2: Hover on text ad element
         await textAdElement.hover();
@@ -767,9 +897,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             // Get advertiser name first
             const advertiserName = await page.evaluate(() => {
                 const selectors = ['.advertiser-name', '.advertiser-name-container', 'h1', '.creative-details-page-header-text', '.ad-details-heading'];
-                for (const sel of selectors) {
-                    const el = document.querySelector(sel);
-                    if (el) {
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
                         const text = el.innerText.trim();
                         if (text && text.length > 2) return text;
                     }
@@ -781,13 +911,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             // Detect ad type
             const adType = await detectAdType(page);
             console.log(`  🔍 Detected ad type: ${adType}`);
-            
-            // Skip if unknown ad type
-            if (adType === 'unknown') {
-                console.log(`  ⏭️  Unknown ad type, skipping extraction`);
-                await page.close();
-                return result;
-            }
             
             // Extract data based on ad type
             if (adType === 'image_ad') {
@@ -801,6 +924,30 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 if (textAdData.appName !== 'NOT_FOUND') result.appName = cleanName(textAdData.appName);
                 if (textAdData.appSubtitle !== 'NOT_FOUND') result.appSubtitle = textAdData.appSubtitle;
                 if (textAdData.storeLink !== 'NOT_FOUND') result.storeLink = textAdData.storeLink;
+            } else {
+                // Fallback: Try both extraction methods if detection failed
+                console.log(`  🔄 Detection failed, trying both extraction methods as fallback...`);
+                
+                // Try image ad extraction first
+                const imageAdData = await extractImageAdData(page, AD_TYPES_CONFIG.image_ad);
+                if (imageAdData.imageUrl !== 'NOT_FOUND' || imageAdData.appName !== 'NOT_FOUND' || imageAdData.storeLink !== 'NOT_FOUND') {
+                    console.log(`  ✅ Found image ad data via fallback`);
+                    if (imageAdData.imageUrl !== 'NOT_FOUND') result.imageUrl = imageAdData.imageUrl;
+                    if (imageAdData.appName !== 'NOT_FOUND') result.appName = cleanName(imageAdData.appName);
+                    if (imageAdData.appSubtitle !== 'NOT_FOUND') result.appSubtitle = imageAdData.appSubtitle;
+                    if (imageAdData.storeLink !== 'NOT_FOUND') result.storeLink = imageAdData.storeLink;
+                } else {
+                    // Try text ad extraction
+                    const textAdData = await extractTextAdData(page, AD_TYPES_CONFIG.text_ad);
+                    if (textAdData.appName !== 'NOT_FOUND' || textAdData.storeLink !== 'NOT_FOUND') {
+                        console.log(`  ✅ Found text ad data via fallback`);
+                        if (textAdData.appName !== 'NOT_FOUND') result.appName = cleanName(textAdData.appName);
+                        if (textAdData.appSubtitle !== 'NOT_FOUND') result.appSubtitle = textAdData.appSubtitle;
+                        if (textAdData.storeLink !== 'NOT_FOUND') result.storeLink = textAdData.storeLink;
+                    } else {
+                        console.log(`  ⚠️ No data found with either extraction method`);
+                    }
+                }
             }
         }
 
