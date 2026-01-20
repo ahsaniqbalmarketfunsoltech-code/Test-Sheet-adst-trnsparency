@@ -582,82 +582,170 @@ async function extractTextAdData(page, config) {
                 
                 console.log(`  ✅ Found text ad element in ${ctx.name}`);
                 
-                // Step 2: Hover on text ad element
-                await textAdElement.hover();
-                await sleep(500);
+                // Step 2: Get the element's container and hover on it
+                const elementInfo = await textAdElement.evaluate(el => {
+                    // Find the parent container that likely contains all ad data
+                    let container = el.closest('[class*="ad"], [class*="creative"], [class*="preview"], [role="article"], [role="link"]');
+                    if (!container) container = el.parentElement;
+                    return {
+                        containerSelector: container ? (container.id ? `#${container.id}` : container.className ? `.${container.className.split(' ')[0]}` : null) : null,
+                        headlineText: (el.innerText || el.textContent || '').trim(),
+                        elementText: (el.innerText || el.textContent || '').trim()
+                    };
+                });
                 
-                // Step 3: Extract all data
-                const extractedData = await context.evaluate((config) => {
-            const data = {
-                appName: null,
-                appHeadline: null,
-                packageName: null
-            };
-            
-            // Extract App Name from span
-            const spanElements = document.querySelectorAll('span');
-            for (const span of spanElements) {
-                const text = (span.innerText || span.textContent || '').trim();
-                if (text && text.length > 5 && text.length < 150 && 
-                    !text.toLowerCase().includes('install') &&
-                    !text.toLowerCase().includes('download')) {
-                    const rect = span.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        data.appName = text;
-                        break;
-                    }
-                }
-            }
-            
-            // Extract App Headline from .cS4Vcb-vnv8ic
-            const headlineEl = document.querySelector('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"]');
-            if (headlineEl) {
-                data.appHeadline = (headlineEl.innerText || headlineEl.textContent || '').trim();
-            }
-            
-            // Extract Package Name from JavaScript data
-            const pageContent = document.documentElement.innerHTML;
-            const patterns = [
-                /AF_dataServiceRequests[^]]*["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)["']/i,
-                /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){2,})["']/gi
-            ];
-            
-            for (const pattern of patterns) {
-                const matches = pageContent.match(pattern);
-                if (matches) {
-                    for (const match of matches) {
-                        const pkg = match.replace(/["']/g, '');
-                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
-                            !pkg.includes('google') && !pkg.includes('android')) {
-                            data.packageName = pkg;
-                            break;
+                // Step 3: Hover on text ad element
+                await textAdElement.hover();
+                await sleep(800); // Wait longer for hover effects
+                
+                // Step 4: Extract all data from the hovered element's context
+                const extractedData = await context.evaluate((elementInfo) => {
+                    const data = {
+                        appName: null,
+                        appHeadline: null,
+                        packageName: null
+                    };
+                    
+                    // Find the hovered element (it should be highlighted/active)
+                    const hoveredElement = document.querySelector('.cS4Vcb-vnv8ic:hover, div.cS4Vcb-vnv8ic:hover, [class*="cS4Vcb"]:hover, [class*="vmv8lc"]:hover');
+                    const targetElement = hoveredElement || document.querySelector('.cS4Vcb-vnv8ic, div.cS4Vcb-vnv8ic, [class*="cS4Vcb"], [class*="vmv8lc"]');
+                    
+                    if (!targetElement) return data;
+                    
+                    // Find the container around this element
+                    let container = targetElement.closest('[class*="ad"], [class*="creative"], [class*="preview"], [role="article"]');
+                    if (!container) container = targetElement.parentElement;
+                    if (!container) container = document.body;
+                    
+                    // Extract App Name from span elements NEAR the hovered element (within container)
+                    const spanElements = container.querySelectorAll('span');
+                    for (const span of spanElements) {
+                        const text = (span.innerText || span.textContent || '').trim();
+                        // More specific: should be substantial text, not buttons/links
+                        if (text && text.length > 5 && text.length < 150 && 
+                            !text.toLowerCase().includes('install') &&
+                            !text.toLowerCase().includes('download') &&
+                            !text.toLowerCase().includes('get it') &&
+                            !text.toLowerCase().includes('play store')) {
+                            const rect = span.getBoundingClientRect();
+                            // Check if it's visible and in a reasonable position
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 0 && rect.left > 0) {
+                                // Prefer spans that are near the headline element
+                                const distance = Math.abs(rect.top - targetElement.getBoundingClientRect().top);
+                                if (distance < 200) { // Within 200px vertically
+                                    data.appName = text;
+                                    break;
+                                }
+                            }
                         }
                     }
-                    if (data.packageName) break;
-                }
-            }
-            
+                    
+                    // Extract App Headline from the hovered element itself
+                    const headlineText = (targetElement.innerText || targetElement.textContent || '').trim();
+                    if (headlineText && headlineText.length > 3 && headlineText.length < 200) {
+                        data.appHeadline = headlineText;
+                    }
+                    
+                    // If we didn't get app name from span, try getting it from the headline or nearby text
+                    if (!data.appName && headlineText) {
+                        // Sometimes the app name is in the headline, separated by | or -
+                        const parts = headlineText.split(/[|\-–—]/).map(p => p.trim()).filter(p => p.length > 3);
+                        if (parts.length > 0) {
+                            data.appName = parts[0]; // First part is usually the app name
+                        }
+                    }
+                    
+                    // Extract Package Name from JavaScript data in this frame
+                    const pageContent = document.documentElement.innerHTML;
+                    const patterns = [
+                        /AF_dataServiceRequests[^]]*["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)["']/i,
+                        /appId\s*[:=]\s*['"](com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+)['"]/i,
+                        /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){3,})["']/gi
+                    ];
+                    
+                    for (const pattern of patterns) {
+                        const matches = pageContent.match(pattern);
+                        if (matches) {
+                            for (const match of matches) {
+                                const pkg = match.replace(/["']/g, '').replace(/^.*?(com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+).*$/i, '$1');
+                                if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                                    !pkg.includes('google') && !pkg.includes('android') &&
+                                    !pkg.includes('example') && pkg.length > 10) {
+                                    data.packageName = pkg;
+                                    break;
+                                }
+                            }
+                            if (data.packageName) break;
+                        }
+                    }
+                    
                     return data;
-                }, config);
+                }, elementInfo);
                 
-                if (extractedData.appName) result.appName = extractedData.appName;
-                if (extractedData.appHeadline) result.appSubtitle = extractedData.appHeadline;
-                if (extractedData.packageName) {
-                    result.storeLink = `https://play.google.com/store/apps/details?id=${extractedData.packageName}`;
+                // Debug: log what we extracted
+                console.log(`  🔍 Extracted from ${ctx.name}: appName="${extractedData.appName}", headline="${extractedData.appHeadline}", package="${extractedData.packageName}"`);
+                
+                // Update result with extracted data
+                if (extractedData.appName && extractedData.appName.trim()) {
+                    result.appName = extractedData.appName.trim();
+                }
+                if (extractedData.appHeadline && extractedData.appHeadline.trim()) {
+                    result.appSubtitle = extractedData.appHeadline.trim();
+                }
+                if (extractedData.packageName && extractedData.packageName.trim()) {
+                    result.storeLink = `https://play.google.com/store/apps/details?id=${extractedData.packageName.trim()}`;
+                }
+                
+                // If we got app name or headline but no package, try searching main page HTML
+                if ((result.appName !== 'NOT_FOUND' || result.appSubtitle !== 'NOT_FOUND') && result.storeLink === 'NOT_FOUND') {
+                    try {
+                        const mainPagePackage = await page.evaluate(() => {
+                            const pageContent = document.documentElement.innerHTML;
+                            const patterns = [
+                                /play\.google\.com\/store\/apps\/details\?id=([a-z0-9_.]+)/gi,
+                                /["'](com\.[a-z0-9_]+(?:\.[a-z0-9_]+){3,})["']/gi
+                            ];
+                            
+                            for (const pattern of patterns) {
+                                const matches = pageContent.match(pattern);
+                                if (matches) {
+                                    for (const match of matches) {
+                                        let pkg = match.replace(/["']/g, '').replace(/^.*?id=([a-z0-9_.]+).*$/i, '$1').replace(/^.*?(com\.[a-z0-9_]+(?:\.[a-z0-9_]+)+).*$/i, '$1');
+                                        if (pkg.startsWith('com.') && pkg.split('.').length >= 3 &&
+                                            !pkg.includes('google') && !pkg.includes('android') &&
+                                            !pkg.includes('example') && pkg.length > 10) {
+                                            return pkg;
+                                        }
+                                    }
+                                }
+                            }
+                            return null;
+                        });
+                        
+                        if (mainPagePackage) {
+                            result.storeLink = `https://play.google.com/store/apps/details?id=${mainPagePackage}`;
+                            console.log(`  ✅ Found package from main page: ${mainPagePackage}`);
+                        }
+                    } catch (e) {
+                        // Ignore errors
+                    }
                 }
                 
                 // If we got any data, return it
-                if (result.appName !== 'NOT_FOUND' || result.storeLink !== 'NOT_FOUND') {
-                    console.log(`  📝 Text Ad (${ctx.name}) - Name: ${result.appName} | Headline: ${result.appSubtitle} | Link: ${result.storeLink.substring(0, 50)}...`);
+                if (result.appName !== 'NOT_FOUND' || result.storeLink !== 'NOT_FOUND' || result.appSubtitle !== 'NOT_FOUND') {
+                    console.log(`  ✅ Text Ad (${ctx.name}) - Name: ${result.appName} | Headline: ${result.appSubtitle} | Link: ${result.storeLink}`);
                     return result;
+                } else {
+                    console.log(`  ⚠️ No data extracted from ${ctx.name}, trying next frame...`);
                 }
             } catch (e) {
-                // Cross-origin frame or other error, continue to next
+                // Cross-origin frame or other error, log and continue
+                console.log(`  ⚠️ Error in ${ctx.name}: ${e.message}`);
                 continue;
             }
         }
         
-        console.log(`  ⚠️ Text ad element not found in any frame`);
+        console.log(`  ⚠️ Text ad element found but no data extracted from any frame`);
         
     } catch (e) {
         console.log(`  ⚠️ Text ad extraction failed: ${e.message}`);
