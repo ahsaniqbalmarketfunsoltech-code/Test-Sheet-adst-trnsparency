@@ -655,61 +655,75 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
                         // =====================================================
                         // EXTRACT IMAGE URL (especially for Image Ads)
+                        // CRITICAL: Only get visible image from current ad preview
                         // Priority: tpc.googlesyndication.com/simgad/ URLs
                         // =====================================================
+                        // First, find the ad preview container (landscape-view or portrait-view)
+                        const adViewContainer = root.querySelector('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
+                        const searchContainer = adViewContainer || root;
+                        
                         const imageSelectors = [
-                            // Priority 1: Specific image ad selectors (landscape/portrait images)
+                            // Priority 1: Specific image IDs within ad view (most reliable)
                             '#landscape-image',
                             '#portrait-image',
                             'img#landscape-image',
                             'img#portrait-image',
+                            
+                            // Priority 2: Images within landscape/portrait containers
                             '.landscape-image img',
                             '.portrait-image img',
                             '.landscape-card img',
                             '.portrait-card img',
                             
-                            // Priority 2: Google syndication image URLs (tpc.googlesyndication.com/simgad/)
+                            // Priority 3: Google syndication image URLs (tpc.googlesyndication.com/simgad/)
                             'img[src*="tpc.googlesyndication.com/simgad"]',
                             'img[src*="googlesyndication.com/simgad"]',
-                            'img[src*="simgad"]',
                             
-                            // Priority 3: General ad image containers
+                            // Priority 4: Other images in ad containers
                             '.html-container img',
-                            '.creative-container img',
-                            '.ad-image img',
-                            '[class*="ad-image"] img',
-                            '[class*="creative-image"] img',
-                            
-                            // Priority 4: Other Google syndication images
-                            'img[src*="googlesyndication.com"]',
-                            'img[src*="archive/simad"]'
+                            '.creative-container img'
                         ];
+                        
+                        let foundImage = null;
+                        let foundSimgadImage = null;
                         
                         for (const sel of imageSelectors) {
                             try {
-                                const img = root.querySelector(sel);
-                                if (img && img.src && img.src.startsWith('http')) {
-                                    // Validate it's a real image URL
+                                const images = searchContainer.querySelectorAll(sel);
+                                for (const img of images) {
+                                    if (!img || !img.src || !img.src.startsWith('http')) continue;
+                                    
+                                    // CRITICAL: Check if image is actually visible (not hidden)
+                                    const rect = img.getBoundingClientRect();
+                                    const isVisible = rect.width > 0 && rect.height > 0 && 
+                                                     rect.width > 50 && rect.height > 50; // Must be substantial size
+                                    
+                                    if (!isVisible) continue; // Skip hidden images
+                                    
                                     const imgSrc = img.src.trim();
                                     
                                     // Prioritize tpc.googlesyndication.com/simgad/ URLs
                                     if (imgSrc.includes('tpc.googlesyndication.com/simgad/') || 
                                         imgSrc.includes('googlesyndication.com/simgad/')) {
-                                        data.imageUrl = imgSrc;
-                                        break; // Found the target image, stop searching
+                                        if (!foundSimgadImage) {
+                                            foundSimgadImage = imgSrc;
+                                        }
                                     }
                                     
-                                    // Accept other valid image URLs if we haven't found one yet
-                                    if (!data.imageUrl && imgSrc.match(/\.(jpg|jpeg|png|gif|webp)/i)) {
-                                        data.imageUrl = imgSrc;
-                                        // Don't break - continue searching for tpc.googlesyndication.com/simgad/ URL
+                                    // Store first visible image as fallback
+                                    if (!foundImage && imgSrc.match(/\.(jpg|jpeg|png|gif|webp)/i)) {
+                                        foundImage = imgSrc;
                                     }
                                 }
                             } catch (e) { }
                         }
                         
-                        // If we found a non-simgad image but want to prioritize simgad URLs, keep searching
-                        // But if we already have a simgad URL, we're done
+                        // Use simgad image if found, otherwise use first visible image
+                        if (foundSimgadImage) {
+                            data.imageUrl = foundSimgadImage;
+                        } else if (foundImage) {
+                            data.imageUrl = foundImage;
+                        }
 
                         // =====================================================
                         // ULTRA-PRECISE STORE LINK EXTRACTOR
@@ -1009,59 +1023,69 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
             // =====================================================
             // FALLBACK FOR IMAGE URL (Main Page - for Image Ads)
+            // CRITICAL: Only get visible image from current ad preview
             // Search main page for tpc.googlesyndication.com/simgad/ URLs
             // =====================================================
             if (result.imageUrl === 'NOT_FOUND') {
                 const mainImageUrl = await page.evaluate(() => {
-                    // Priority: Find image in ad content area first
-                    const adContentArea = document.querySelector('#portrait-landscape-phone, .creative-container, .ad-preview, [class*="creative"], #landscape-view, #portrait-view');
+                    // CRITICAL: Find the actual ad preview container (landscape-view or portrait-view)
+                    const adViewContainer = document.querySelector('#landscape-view, #portrait-view, .landscape-view, .portrait-view');
+                    if (!adViewContainer) return null;
                     
                     const imageSelectors = [
-                        // Specific image ad selectors
+                        // Priority 1: Specific image IDs within ad view (most reliable)
                         '#landscape-image',
                         '#portrait-image',
                         'img#landscape-image',
                         'img#portrait-image',
+                        
+                        // Priority 2: Images within landscape/portrait containers
                         '.landscape-image img',
                         '.portrait-image img',
                         '.landscape-card img',
                         '.portrait-card img',
                         
-                        // Google syndication image URLs (priority)
+                        // Priority 3: Google syndication image URLs
                         'img[src*="tpc.googlesyndication.com/simgad"]',
-                        'img[src*="googlesyndication.com/simgad"]',
-                        'img[src*="simgad"]',
-                        
-                        // General ad images
-                        '.html-container img',
-                        '.creative-container img',
-                        '.ad-image img'
+                        'img[src*="googlesyndication.com/simgad"]'
                     ];
                     
-                    // Search in ad content area first
-                    const searchRoot = adContentArea || document;
+                    let foundSimgadImage = null;
+                    let foundImage = null;
                     
                     for (const sel of imageSelectors) {
                         try {
-                            const img = searchRoot.querySelector(sel);
-                            if (img && img.src && img.src.startsWith('http')) {
+                            const images = adViewContainer.querySelectorAll(sel);
+                            for (const img of images) {
+                                if (!img || !img.src || !img.src.startsWith('http')) continue;
+                                
+                                // CRITICAL: Check if image is actually visible and substantial
+                                const rect = img.getBoundingClientRect();
+                                const isVisible = rect.width > 0 && rect.height > 0 && 
+                                                 rect.width > 50 && rect.height > 50; // Must be substantial size
+                                
+                                if (!isVisible) continue; // Skip hidden/small images
+                                
                                 const imgSrc = img.src.trim();
                                 
                                 // Prioritize tpc.googlesyndication.com/simgad/ URLs
                                 if (imgSrc.includes('tpc.googlesyndication.com/simgad/') || 
                                     imgSrc.includes('googlesyndication.com/simgad/')) {
-                                    return imgSrc;
+                                    if (!foundSimgadImage) {
+                                        foundSimgadImage = imgSrc;
+                                    }
                                 }
                                 
-                                // Accept other valid image URLs if we haven't found simgad yet
-                                if (imgSrc.match(/\.(jpg|jpeg|png|gif|webp)/i) || imgSrc.includes('googlesyndication.com')) {
-                                    return imgSrc;
+                                // Store first visible image as fallback
+                                if (!foundImage && imgSrc.match(/\.(jpg|jpeg|png|gif|webp)/i)) {
+                                    foundImage = imgSrc;
                                 }
                             }
                         } catch (e) { }
                     }
                     
-                    return null;
+                    // Return simgad image if found, otherwise first visible image
+                    return foundSimgadImage || foundImage || null;
                 });
                 if (mainImageUrl) {
                     result.imageUrl = mainImageUrl;
