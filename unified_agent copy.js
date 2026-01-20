@@ -168,26 +168,30 @@ async function batchWriteToSheet(sheets, updates) {
     if (updates.length === 0) return;
 
     const data = [];
+    // Write each field independently - if one field fails to extract, others still get written
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, appSubtitle, imageUrl }) => {
         const rowNum = rowIndex + 1;
+        // Write advertiser name (Column A) - only if not SKIP
         if (advertiserName && advertiserName !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
         }
+        // Write store link (Column C) - only if not SKIP
         if (storeLink && storeLink !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
         }
+        // Write app name (Column D) - only if not SKIP
         if (appName && appName !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
         }
-        // Write app subtitle/tagline to Column F
+        // Write app subtitle/tagline (Column F) - always write (NOT_FOUND if missing)
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
         data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
 
-        // Write Image URL to Column G
+        // Write Image URL (Column G) - always write (NOT_FOUND if missing)
         const imageUrlValue = imageUrl || 'NOT_FOUND';
         data.push({ range: `${SHEET_NAME}!G${rowNum}`, values: [[imageUrlValue]] });
 
-        // Write Timestamp to Column M (Pakistan Time)
+        // Write Timestamp (Column M) - always write
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
         data.push({ range: `${SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
     });
@@ -738,45 +742,73 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
 
             // =====================================================
             // EXTRACT SUBTITLE - Only cS4Vcb-vnv8ic class with hover
+            // Non-blocking: If this fails, other extractions continue
             // =====================================================
             if (needsMetadata && result.appSubtitle === 'NOT_FOUND') {
-                console.log(`  📝 Extracting subtitle (cS4Vcb-vnv8ic)...`);
-                
+                // Run subtitle extraction in a separate try-catch to ensure it doesn't block other extractions
                 try {
+                    console.log(`  📝 Extracting subtitle (cS4Vcb-vnv8ic)...`);
+                    
+                    // Wait a bit more for dynamic content to load (but don't wait too long)
+                    await sleep(1000 + Math.random() * 500);
+                    
                     const client = await page.target().createCDPSession();
                     
                     // First, try extracting from iframes (most common location for ad creatives)
                     const frames = page.frames();
+                    console.log(`  🔍 Checking ${frames.length} iframes for subtitle...`);
+                    
                     for (const frame of frames) {
                         try {
-                            // Find subtitle elements in this frame
+                            // Find subtitle elements in this frame - try multiple selectors
                             const subtitleInfo = await frame.evaluate(() => {
                                 const root = document.querySelector('#portrait-landscape-phone') || document.body;
-                                const subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
+                                
+                                // Try exact class first
+                                let subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
+                                
+                                // If not found, try partial match
+                                if (subtitleEls.length === 0) {
+                                    subtitleEls = root.querySelectorAll('[class*="cS4Vcb"][class*="vnv8ic"]');
+                                }
+                                
+                                // If still not found, try any element with vnv8ic
+                                if (subtitleEls.length === 0) {
+                                    subtitleEls = root.querySelectorAll('[class*="vnv8ic"]');
+                                }
+                                
                                 const elements = [];
                                 
                                 for (const el of subtitleEls) {
                                     const rect = el.getBoundingClientRect();
                                     if (rect.width > 0 && rect.height > 0) {
                                         const text = (el.innerText || el.textContent || '').trim();
-                                        if (text && text.length >= 3 && text.length <= 150) {
-                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
+                                        if (text && text.length >= 3 && text.length <= 200) {
+                                            // Less strict validation - just avoid CSS-like content
+                                            if (!text.includes('{') && !text.includes('px') && !text.includes('height') && !text.includes('width')) {
                                                 // Check if this is in the ad creative area (not header/footer)
                                                 const bodyRect = document.body.getBoundingClientRect();
                                                 // Element should be in the visible/middle area
-                                                if (rect.top > bodyRect.top + 50 && rect.bottom < bodyRect.bottom - 50) {
+                                                if (rect.top > bodyRect.top + 30 && rect.bottom < bodyRect.bottom - 30) {
                                                     elements.push({
                                                         x: rect.left + rect.width / 2,
                                                         y: rect.top + rect.height / 2,
-                                                        text: text
+                                                        text: text,
+                                                        area: rect.width * rect.height
                                                     });
                                                 }
                                             }
                                         }
                                     }
                                 }
+                                
+                                // Sort by area (larger elements are more likely to be the main subtitle)
+                                elements.sort((a, b) => b.area - a.area);
+                                
                                 return elements;
                             });
+
+                            console.log(`  🔍 Frame found ${subtitleInfo ? subtitleInfo.length : 0} subtitle candidates`);
 
                             // Hover on each subtitle element found in this frame
                             if (subtitleInfo && subtitleInfo.length > 0) {
@@ -790,19 +822,38 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                 const absoluteX = iframeRect.x + subtitleEl.x;
                                                 const absoluteY = iframeRect.y + subtitleEl.y;
                                                 
+                                                // Scroll to element first to ensure it's visible
+                                                await page.evaluate((x, y) => {
+                                                    window.scrollTo(x - window.innerWidth / 2, y - window.innerHeight / 2);
+                                                }, absoluteX, absoluteY);
+                                                await sleep(300);
+                                                
                                                 // Hover on the subtitle element
                                                 await client.send('Input.dispatchMouseEvent', {
                                                     type: 'mouseMoved',
                                                     x: absoluteX,
                                                     y: absoluteY
                                                 });
-                                                await sleep(600 + Math.random() * 400); // Wait for hover effects
+                                                await sleep(800 + Math.random() * 400); // Wait for hover effects
                                                 
                                                 // After hover, extract the text from the subtitle element
-                                                // Hovering helps reveal the correct element, so we extract all and pick the best one
                                                 const hoveredText = await frame.evaluate(() => {
                                                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
-                                                    const subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
+                                                    
+                                                    // Try exact class first
+                                                    let subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
+                                                    
+                                                    // If not found, try partial match
+                                                    if (subtitleEls.length === 0) {
+                                                        subtitleEls = root.querySelectorAll('[class*="cS4Vcb"][class*="vnv8ic"]');
+                                                    }
+                                                    
+                                                    // If still not found, try any element with vnv8ic
+                                                    if (subtitleEls.length === 0) {
+                                                        subtitleEls = root.querySelectorAll('[class*="vnv8ic"]');
+                                                    }
+                                                    
+                                                    const candidates = [];
                                                     
                                                     // Return first valid subtitle in ad creative area (after hover, this should be the correct one)
                                                     for (const el of subtitleEls) {
@@ -810,16 +861,23 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                         if (rect.width > 0 && rect.height > 0) {
                                                             const bodyRect = document.body.getBoundingClientRect();
                                                             // Element should be in the visible/middle area (ad creative)
-                                                            if (rect.top > bodyRect.top + 50 && rect.bottom < bodyRect.bottom - 50) {
+                                                            if (rect.top > bodyRect.top + 30 && rect.bottom < bodyRect.bottom - 30) {
                                                                 const text = (el.innerText || el.textContent || '').trim();
-                                                                if (text && text.length >= 3 && text.length <= 150) {
-                                                                    if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
-                                                                        return text;
+                                                                if (text && text.length >= 3 && text.length <= 200) {
+                                                                    if (!text.includes('{') && !text.includes('px') && !text.includes('height') && !text.includes('width')) {
+                                                                        candidates.push({ text, area: rect.width * rect.height });
                                                                     }
                                                                 }
                                                             }
                                                         }
                                                     }
+                                                    
+                                                    // Return the largest element (most likely the main subtitle)
+                                                    if (candidates.length > 0) {
+                                                        candidates.sort((a, b) => b.area - a.area);
+                                                        return candidates[0].text;
+                                                    }
+                                                    
                                                     return null;
                                                 });
 
@@ -831,61 +889,98 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                             }
                                         }
                                     } catch (e) {
-                                        // Continue to next element
+                                        // Continue to next element - don't let one error stop the process
+                                        console.log(`  ⚠️ Hover error (continuing): ${e.message}`);
                                     }
                                 }
                                 
                                 if (result.appSubtitle !== 'NOT_FOUND') break; // Found subtitle, stop checking frames
                             }
                         } catch (e) {
-                            // Cross-origin iframe or error, skip
+                            // Cross-origin iframe or error, skip silently and continue
+                            console.log(`  ⚠️ Frame error (continuing): ${e.message}`);
                         }
                     }
 
                     // Fallback: try main page if not found in iframes
                     if (result.appSubtitle === 'NOT_FOUND') {
+                        console.log(`  🔍 Checking main page for subtitle...`);
                         const subtitleElements = await page.evaluate(() => {
                             const elements = [];
-                            const allElements = document.querySelectorAll('.cS4Vcb-vnv8ic');
+                            
+                            // Try exact class first
+                            let allElements = document.querySelectorAll('.cS4Vcb-vnv8ic');
+                            
+                            // If not found, try partial match
+                            if (allElements.length === 0) {
+                                allElements = document.querySelectorAll('[class*="cS4Vcb"][class*="vnv8ic"]');
+                            }
+                            
+                            // If still not found, try any element with vnv8ic
+                            if (allElements.length === 0) {
+                                allElements = document.querySelectorAll('[class*="vnv8ic"]');
+                            }
+                            
                             allElements.forEach(el => {
                                 const rect = el.getBoundingClientRect();
                                 if (rect.width > 0 && rect.height > 0) {
                                     const text = (el.innerText || el.textContent || '').trim();
-                                    if (text && text.length >= 3 && text.length <= 150) {
-                                        if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
+                                    if (text && text.length >= 3 && text.length <= 200) {
+                                        if (!text.includes('{') && !text.includes('px') && !text.includes('height') && !text.includes('width')) {
                                             const bodyRect = document.body.getBoundingClientRect();
-                                            if (rect.top > bodyRect.top + 100 && rect.bottom < bodyRect.bottom - 100) {
+                                            if (rect.top > bodyRect.top + 50 && rect.bottom < bodyRect.bottom - 50) {
                                                 elements.push({
                                                     x: rect.left + rect.width / 2,
                                                     y: rect.top + rect.height / 2,
-                                                    text: text
+                                                    text: text,
+                                                    area: rect.width * rect.height
                                                 });
                                             }
                                         }
                                     }
                                 }
                             });
+                            
+                            // Sort by area (larger elements first)
+                            elements.sort((a, b) => b.area - a.area);
+                            
                             return elements;
                         });
+
+                        console.log(`  🔍 Main page found ${subtitleElements.length} subtitle candidates`);
 
                         // Hover on main page subtitle elements
                         for (const subtitleEl of subtitleElements) {
                             try {
+                                // Scroll to element first
+                                await page.evaluate((x, y) => {
+                                    window.scrollTo(x - window.innerWidth / 2, y - window.innerHeight / 2);
+                                }, subtitleEl.x, subtitleEl.y);
+                                await sleep(300);
+                                
                                 await client.send('Input.dispatchMouseEvent', {
                                     type: 'mouseMoved',
                                     x: subtitleEl.x,
                                     y: subtitleEl.y
                                 });
-                                await sleep(600 + Math.random() * 400);
+                                await sleep(800 + Math.random() * 400);
                                 
                                 const hoveredText = await page.evaluate((x, y) => {
                                     const element = document.elementFromPoint(x, y);
-                                    if (element && element.classList.contains('cS4Vcb-vnv8ic')) {
-                                        const text = (element.innerText || element.textContent || '').trim();
-                                        if (text && text.length >= 3 && text.length <= 150) {
-                                            if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
-                                                return text;
+                                    if (element) {
+                                        // Check if element or its parent has the class
+                                        let checkEl = element;
+                                        for (let i = 0; i < 3 && checkEl; i++) {
+                                            if (checkEl.classList && (checkEl.classList.contains('cS4Vcb-vnv8ic') || 
+                                                checkEl.className.includes('vnv8ic'))) {
+                                                const text = (checkEl.innerText || checkEl.textContent || '').trim();
+                                                if (text && text.length >= 3 && text.length <= 200) {
+                                                    if (!text.includes('{') && !text.includes('px')) {
+                                                        return text;
+                                                    }
+                                                }
                                             }
+                                            checkEl = checkEl.parentElement;
                                         }
                                     }
                                     return null;
@@ -897,12 +992,19 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                     break;
                                 }
                             } catch (e) {
-                                // Continue to next element
+                                // Continue to next element - don't let one error stop the process
+                                console.log(`  ⚠️ Main page hover error (continuing): ${e.message}`);
                             }
                         }
                     }
+                    
+                    if (result.appSubtitle === 'NOT_FOUND') {
+                        console.log(`  ⚠️ Subtitle not found - continuing with other extractions`);
+                    }
                 } catch (e) {
-                    console.log(`  ⚠️ Subtitle extraction error: ${e.message}`);
+                    // Subtitle extraction failed, but continue with other fields
+                    console.log(`  ⚠️ Subtitle extraction failed (continuing): ${e.message}`);
+                    result.appSubtitle = 'NOT_FOUND'; // Ensure it's set to NOT_FOUND
                 }
             }
         }
@@ -910,9 +1012,22 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
         await page.close();
         return result;
     } catch (err) {
-        console.error(`  ❌ Error: ${err.message}`);
-        await page.close();
-        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', appSubtitle: 'ERROR', imageUrl: 'ERROR' };
+        console.error(`  ❌ Critical error: ${err.message}`);
+        // Return whatever we successfully extracted, not all ERROR
+        // This ensures other fields are still written even if extraction fails
+        try {
+            await page.close();
+        } catch (e) {
+            // Ignore close errors
+        }
+        // Return partial results - only set ERROR for fields that weren't extracted
+        return {
+            advertiserName: result.advertiserName || 'ERROR',
+            appName: result.appName || 'ERROR',
+            storeLink: result.storeLink || 'ERROR',
+            appSubtitle: result.appSubtitle || 'ERROR',
+            imageUrl: result.imageUrl || 'ERROR'
+        };
     }
 }
 
