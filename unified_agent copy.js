@@ -966,11 +966,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             // Search the full page HTML for package names
             // =====================================================
             if (result.storeLink === 'NOT_FOUND') {
+                console.log(`  🔍 Searching full HTML content for store link...`);
                 try {
                     const fullContent = await page.content();
+                    console.log(`  📄 HTML content length: ${fullContent.length} chars`);
 
                     // Method 1: Look for play.google.com/store/apps/details?id= pattern
                     const playStoreMatches = fullContent.match(/play\.google\.com\/store\/apps\/details\?id=([a-zA-Z0-9._]+)/g);
+                    console.log(`  📱 Play Store direct matches: ${playStoreMatches ? playStoreMatches.length : 0}`);
                     if (playStoreMatches && playStoreMatches.length > 0) {
                         const idMatch = playStoreMatches[0].match(/id=([a-zA-Z0-9._]+)/);
                         if (idMatch && idMatch[1]) {
@@ -982,6 +985,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     // Method 2: Look for encoded adurl with package
                     if (result.storeLink === 'NOT_FOUND') {
                         const adurlMatches = fullContent.match(/adurl=https?%3A%2F%2Fplay\.google\.com%2Fstore%2Fapps%2Fdetails%3Fid%3D([a-zA-Z0-9._]+)/g);
+                        console.log(`  📱 Encoded adurl matches: ${adurlMatches ? adurlMatches.length : 0}`);
                         if (adurlMatches && adurlMatches.length > 0) {
                             const idMatch = adurlMatches[0].match(/id%3D([a-zA-Z0-9._]+)/);
                             if (idMatch && idMatch[1]) {
@@ -991,12 +995,39 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         }
                     }
 
-                    // Method 3: Look for package name patterns in data-asoch-meta
+                    // Method 3: Look for data-asoch-meta containing package info
                     if (result.storeLink === 'NOT_FOUND') {
-                        const metaMatch = fullContent.match(/data-asoch-meta="[^"]*id=([a-zA-Z0-9._]+)[^"]*"/);
-                        if (metaMatch && metaMatch[1] && !metaMatch[1].includes('google')) {
-                            result.storeLink = `https://play.google.com/store/apps/details?id=${metaMatch[1]}`;
-                            console.log(`  ✓ Found store link (meta content): ${result.storeLink.substring(0, 60)}...`);
+                        // Check if data-asoch-meta exists in the content
+                        const hasAsochMeta = fullContent.includes('data-asoch-meta');
+                        console.log(`  📱 Has data-asoch-meta: ${hasAsochMeta}`);
+
+                        if (hasAsochMeta) {
+                            // Try to find package pattern in the meta content
+                            const metaMatch = fullContent.match(/data-asoch-meta="[^"]*?id%3D([a-zA-Z0-9._]+)/);
+                            if (metaMatch && metaMatch[1] && !metaMatch[1].includes('google')) {
+                                result.storeLink = `https://play.google.com/store/apps/details?id=${metaMatch[1]}`;
+                                console.log(`  ✓ Found store link (meta encoded): ${result.storeLink.substring(0, 60)}...`);
+                            }
+                        }
+                    }
+
+                    // Method 4: Look for any package name pattern (com.xxx.xxx)
+                    if (result.storeLink === 'NOT_FOUND') {
+                        // Search for patterns like "com.walk.walkwin" in the HTML
+                        const packagePattern = /["\s]([a-z][a-z0-9_]*\.[a-z0-9_]+\.[a-z0-9._]+)["\s,\]]/gi;
+                        const allPackages = [...fullContent.matchAll(packagePattern)];
+                        const validPackages = allPackages
+                            .map(m => m[1])
+                            .filter(pkg =>
+                                pkg.startsWith('com.') &&
+                                !pkg.includes('google') &&
+                                !pkg.includes('android') &&
+                                pkg.split('.').length >= 3
+                            );
+                        console.log(`  📱 Package name patterns found: ${validPackages.length}`);
+                        if (validPackages.length > 0) {
+                            result.storeLink = `https://play.google.com/store/apps/details?id=${validPackages[0]}`;
+                            console.log(`  ✓ Found store link (package pattern): ${result.storeLink.substring(0, 60)}...`);
                         }
                     }
                 } catch (e) {
