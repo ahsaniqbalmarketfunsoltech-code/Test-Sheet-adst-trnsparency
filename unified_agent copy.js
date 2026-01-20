@@ -697,6 +697,16 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (parts.length > 0) clean = parts[0];
                             }
                             clean = clean.replace(/\s+/g, ' ').trim();
+
+                            // Blacklist for app names
+                            const blacklistNames = [
+                                'ad details', 'google ads', 'transparency center', 'about this ad',
+                                'privacy policy', 'terms of service', 'install now', 'download',
+                                'play store', 'app store', 'advertisement', 'sponsored',
+                                'open', 'get', 'visit', 'learn more'
+                            ];
+                            if (blacklistNames.some(name => clean.toLowerCase() === name || clean.toLowerCase().includes(name))) return null;
+
                             if (clean.length < 2 || clean.length > 80) return null;
                             if (/^[\d\s\W]+$/.test(clean)) return null;
                             return clean;
@@ -1260,20 +1270,29 @@ async function extractWithRetry(item, browser) {
         const isAppleStore = currentStoreLink && currentStoreLink.includes('apps.apple.com');
 
         // Success criteria:
-        const metadataSuccess = !item.needsMetadata || (bestResult.storeLink !== 'NOT_FOUND' || bestResult.appName !== 'NOT_FOUND');
+        const hasName = bestResult.appName && bestResult.appName !== 'NOT_FOUND' && bestResult.appName !== 'SKIP';
+        const hasLink = bestResult.storeLink && bestResult.storeLink !== 'NOT_FOUND' && bestResult.storeLink !== 'SKIP';
+        const hasVideo = bestResult.videoId && bestResult.videoId !== 'NOT_FOUND' && bestResult.videoId !== 'SKIP';
+        const hasSubtitle = bestResult.appSubtitle && bestResult.appSubtitle !== 'NOT_FOUND' && bestResult.appSubtitle !== 'SKIP';
+
+        const metadataSuccess = !item.needsMetadata || (hasName && hasLink);
 
         // Video success: 
         // - If we found a video ID, great! 
-        // - If it's a text ad (found headline/subtitle in Col F), then we don't strictly need a video ID.
-        const hasHeadline = bestResult.appSubtitle && bestResult.appSubtitle !== 'NOT_FOUND' && bestResult.appSubtitle !== 'SKIP';
-        const videoSuccess = isAppleStore || !isPlayStore || bestResult.videoId === 'SKIP' ||
-            (bestResult.videoId !== 'NOT_FOUND' && bestResult.videoId !== null) ||
-            (metadataSuccess && hasHeadline); // If it's a text ad with a headline, call it success
+        // - If it's a text/image ad (no video expected), metadata + subtitle is enough.
+        // - We also check the mainPageInfo from the last attempt to see if it even detected a video
+        const videoSuccess = !item.needsVideoId || hasVideo || isAppleStore || !isPlayStore || (metadataSuccess && hasSubtitle);
 
         if (metadataSuccess && videoSuccess) {
             return bestResult;
         } else {
             console.log(`  ⚠️ Attempt ${attempt} result: Metadata=${metadataSuccess}, Video=${videoSuccess}.`);
+
+            // Optimization: If we found metadata but missing video ID, update next attempt to only focus on video
+            if (metadataSuccess && !videoSuccess) {
+                item.needsMetadata = false;
+                item.existingStoreLink = bestResult.storeLink;
+            }
         }
 
         await randomDelay(1500, 3000);
@@ -1330,10 +1349,10 @@ async function extractWithRetry(item, browser) {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--no-zygote',
-            '--single-process',
-            '--disable-software-rasterizer',
-            '--no-first-run'
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--no-first-run',
+            '--window-size=1280,720'
         ];
 
         const proxy = pickProxy();
@@ -1346,6 +1365,7 @@ async function extractWithRetry(item, browser) {
             browser = await puppeteer.launch({
                 headless: 'new',
                 args: launchArgs,
+                timeout: 60000,
                 executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
             });
         } catch (launchError) {
