@@ -1,0 +1,105 @@
+name: Top to Bottom Agent
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      sheet_name:
+        description: 'Sheet name to process'
+        required: false
+        default: 'Test'
+      concurrent_pages:
+        description: 'Number of concurrent pages'
+        required: false
+        default: '3'
+      auto_restart:
+        description: 'Auto restart after completion'
+        required: false
+        default: 'true'
+
+jobs:
+  extract-top-to-bottom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+    permissions:
+      contents: read
+      actions: write  # Required to trigger workflow dispatch
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libxkbcommon0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2 \
+            libpango-1.0-0 \
+            libcairo2
+
+      - name: Create credentials file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Run Top-to-Bottom Agent
+        env:
+          SHEET_NAME: ${{ github.event.inputs.sheet_name || 'Test' }}
+          CONCURRENT_PAGES: ${{ github.event.inputs.concurrent_pages || '3' }}
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: false
+          NODE_OPTIONS: '--max-old-space-size=4096'
+        run: |
+          echo "🚀 Starting Top-to-Bottom Agent..."
+          echo "📋 Sheet: $SHEET_NAME"
+          echo "⚡ Concurrent Pages: $CONCURRENT_PAGES"
+          node top_to_bottom_agent.js
+        timeout-minutes: 350
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Top-to-Bottom Agent Complete! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "- **Sheet:** ${{ github.event.inputs.sheet_name || 'Test' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Direction:** Top → Bottom" >> $GITHUB_STEP_SUMMARY
+          echo "- **Time:** $(date)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Wait 3 minutes before restart
+        if: always() && github.event.inputs.auto_restart != 'false'
+        run: |
+          echo "⏳ Waiting 3 minutes before auto-restart..."
+          sleep 180
+
+      - name: Auto-restart workflow
+        if: always() && github.event.inputs.auto_restart != 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔄 Triggering workflow restart..."
+          gh workflow run "top_to_bottom_agent.yml" \
+            -f sheet_name="${{ github.event.inputs.sheet_name || 'Test' }}" \
+            -f concurrent_pages="${{ github.event.inputs.concurrent_pages || '3' }}" \
+            -f auto_restart="true"
+          echo "✅ Workflow restart triggered!"

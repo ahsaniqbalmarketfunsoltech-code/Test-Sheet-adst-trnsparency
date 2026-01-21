@@ -1,8 +1,10 @@
 /**
- * APP NAME EXTRACTION AGENT (BOTTOM TO TOP)
+ * APP NAME EXTRACTION AGENT (TOP TO BOTTOM)
  * =====================================
  * Extracts App Name & Subtitle from ALL Google Ads Transparency URLs
- * Processes rows from BOTTOM to TOP in batches
+ * Processes rows from TOP to BOTTOM in batches
+ * 
+ * Run this alongside "unified_agent copy.js" (bottom-to-top) for 2x speed!
  * 
  * Sheet Structure:
  *   Column A: Advertiser Name
@@ -92,41 +94,34 @@ async function getGoogleSheetsClient() {
     return google.sheets({ version: 'v4', auth: authClient });
 }
 
+/**
+ * GET URL DATA - TOP TO BOTTOM
+ * Scans from row 2 (first data row) downward
+ */
 async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     const toProcess = [];
 
-    // First, get the total number of rows using sheet metadata (supports 40,000+ rows)
-    // Then scan ALL rows from absolute bottom to top
-    console.log(`📊 Finding total rows and scanning ALL data from BOTTOM to TOP in batches of ${batchSize} rows...`);
+    console.log(`📊 Finding total rows and scanning ALL data from TOP to BOTTOM in batches of ${batchSize} rows...`);
 
-    // Get the actual total row count using sheet metadata (supports 40,000+ rows)
+    // Get the actual total row count using sheet metadata
     let totalRows = 0;
-    let metadataRowCount = 0;
     try {
-        // Use spreadsheet metadata to get actual row count
         const sheetMetadata = await sheets.spreadsheets.get({
             spreadsheetId: SPREADSHEET_ID,
             ranges: [`${ESCAPED_SHEET_NAME}`],
             fields: 'sheets.properties.gridProperties.rowCount'
         });
 
-        // Get the row count from metadata - this is our PRIMARY source of truth
         const sheetProps = sheetMetadata.data.sheets?.[0]?.properties?.gridProperties;
         if (sheetProps && sheetProps.rowCount) {
-            metadataRowCount = sheetProps.rowCount;
-            console.log(`  ✓ Sheet metadata indicates ${metadataRowCount} total rows`);
+            totalRows = sheetProps.rowCount;
+            console.log(`  ✓ Sheet metadata indicates ${totalRows} total rows`);
         }
 
-        // Use metadata row count as primary, but try to find last row with actual data
-        // by checking column B (URL column) from bottom up in chunks
-        // This handles cases where metadata rowCount includes empty rows
-        if (metadataRowCount > 0) {
-            totalRows = metadataRowCount;
-
-            // Try to find the actual last row with data by checking from bottom
-            // Check in reverse chunks of 1000 to find where data ends
+        // Find actual last row with data
+        if (totalRows > 0) {
             let foundLastDataRow = false;
-            let checkEnd = metadataRowCount;
+            let checkEnd = totalRows;
 
             while (!foundLastDataRow && checkEnd > 1) {
                 const checkStart = Math.max(2, checkEnd - 1000);
@@ -137,7 +132,6 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                     });
                     const checkRows = checkResponse.data.values || [];
 
-                    // Find last non-empty row in this chunk
                     for (let i = checkRows.length - 1; i >= 0; i--) {
                         const cell = checkRows[i]?.[0]?.trim();
                         if (cell && cell.length > 0) {
@@ -152,17 +146,15 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                         checkEnd = checkStart - 1;
                     }
                 } catch (e) {
-                    // If error, assume this chunk has data and use metadata count
                     foundLastDataRow = true;
                 }
             }
         }
 
-        console.log(`  ✓ Will scan ${totalRows} rows from BOTTOM (row ${totalRows}) to TOP (row 2)`);
+        console.log(`  ✓ Will scan from TOP (row 2) to BOTTOM (row ${totalRows})`);
     } catch (error) {
         console.error(`  ⚠️ Error finding total rows: ${error.message}`);
-        // Fallback: try to get rows in batches from a large assumed number
-        totalRows = 100000; // Assume large number, will stop when no more data
+        totalRows = 100000;
     }
 
     if (totalRows <= 1) {
@@ -170,15 +162,16 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
         return toProcess;
     }
 
-    // Process from bottom to top in batches
-    let endRow = totalRows; // Start from the last row
+    // =====================================================
+    // PROCESS FROM TOP TO BOTTOM
+    // =====================================================
+    let startRow = 2; // Start from row 2 (skip header)
     let hasMoreData = true;
     let totalProcessed = 0;
 
-    while (hasMoreData && endRow > 1) {
+    while (hasMoreData && startRow <= totalRows) {
         try {
-            // Calculate start row for this batch (working backwards)
-            const startRow = Math.max(2, endRow - batchSize + 1); // Row 2 is first data row (skip header)
+            const endRow = Math.min(startRow + batchSize - 1, totalRows);
             const range = `${ESCAPED_SHEET_NAME}!A${startRow}:E${endRow}`;
 
             const response = await sheets.spreadsheets.values.get({
@@ -193,10 +186,10 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 break;
             }
 
-            // Process rows in reverse order (from bottom to top within this batch)
-            for (let i = rows.length - 1; i >= 0; i--) {
+            // Process rows in order (TOP to BOTTOM)
+            for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
-                const actualRowIndex = startRow + i - 1; // Actual row number in sheet (0-indexed from startRow)
+                const actualRowIndex = startRow + i - 1; // 0-indexed row number
                 const url = row[1]?.trim() || '';
                 const storeLink = row[2]?.trim() || '';
                 const appName = row[3]?.trim() || '';
@@ -206,9 +199,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 if (!url) continue;
 
                 // Skip rows that already have ANY value in column C (storeLink)
-                // This means they've been processed (whether SKIP, BLOCKED, NOT_FOUND, or actual data)
                 if (storeLink) {
-                    // Only exception: if it has a valid Play Store link but missing video ID
                     const hasValidStoreLink = storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com');
                     const needsVideoId = hasValidStoreLink && !videoId;
 
@@ -221,7 +212,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                             existingStoreLink: storeLink
                         });
                     }
-                    continue; // Skip - already has data in column C
+                    continue;
                 }
 
                 // Row has no storeLink - needs processing
@@ -235,30 +226,27 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
             }
 
             totalProcessed += rows.length;
-            console.log(`  ✓ Processed ${totalProcessed} rows (from bottom), found ${toProcess.length} to process`);
+            console.log(`  ✓ Processed ${totalProcessed} rows (from top), found ${toProcess.length} to process`);
 
-            // Move to next batch (going backwards)
-            endRow = startRow - 1;
+            // Move to next batch (going forward)
+            startRow = endRow + 1;
 
-            // If we've reached row 1 (header), we're done
-            if (endRow <= 1) {
+            if (startRow > totalRows) {
                 hasMoreData = false;
             } else {
-                // Small delay between batches to avoid rate limits
                 await sleep(100);
             }
         } catch (error) {
-            console.error(`  ⚠️ Error loading batch ending at row ${endRow}: ${error.message}`);
-            // If error, try to continue with next batch (move backwards)
-            endRow -= batchSize;
-            if (endRow <= 1) {
+            console.error(`  ⚠️ Error loading batch starting at row ${startRow}: ${error.message}`);
+            startRow += batchSize;
+            if (startRow > totalRows) {
                 hasMoreData = false;
             }
-            await sleep(500); // Wait a bit longer on error
+            await sleep(500);
         }
     }
 
-    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing (from bottom to top)\n`);
+    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing (from top to bottom)\n`);
     return toProcess;
 }
 
@@ -266,33 +254,25 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
     if (updates.length === 0) return;
 
     const MAX_WRITE_RETRIES = 5;
-    const BASE_RETRY_DELAY = 5000; // 5 seconds base delay
+    const BASE_RETRY_DELAY = 5000;
 
     const data = [];
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, appSubtitle }) => {
         const rowNum = rowIndex + 1;
 
-        // WRITE EVERYTHING - whatever data we get, write it to the sheet
-        // This ensures every processed row gets marked with something
-
-        // Write advertiser name (if we have any value)
         if (advertiserName && advertiserName !== 'NOT_FOUND') {
             data.push({ range: `${ESCAPED_SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
         }
 
-        // Write store link (always write something - even BLOCKED, NOT_FOUND, ERROR)
         const storeLinkValue = storeLink || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
 
-        // Write app name (always write something)
         const appNameValue = appName || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!D${rowNum}`, values: [[appNameValue]] });
 
-        // Write app subtitle/headline to Column F
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
 
-        // Write Timestamp to Column M (Pakistan Time)
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
         data.push({ range: `${ESCAPED_SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
     });
@@ -313,20 +293,17 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
             errorMessage.includes('UNAVAILABLE') || errorMessage.includes('timeout');
 
         if ((isRateLimit || isTransient) && retryCount < MAX_WRITE_RETRIES) {
-            // Exponential backoff: 5s, 10s, 20s, 40s, 80s
             const retryDelay = BASE_RETRY_DELAY * Math.pow(2, retryCount);
             console.log(`  ⚠️ Sheet write error (${errorMessage.substring(0, 50)}...). Retry ${retryCount + 1}/${MAX_WRITE_RETRIES} in ${retryDelay / 1000}s...`);
             await sleep(retryDelay);
             return batchWriteToSheet(sheets, updates, retryCount + 1);
         } else if (retryCount < MAX_WRITE_RETRIES) {
-            // Non-rate-limit error, still retry with shorter delay
             const retryDelay = 3000;
             console.log(`  ⚠️ Sheet write error: ${errorMessage}. Retry ${retryCount + 1}/${MAX_WRITE_RETRIES} in ${retryDelay / 1000}s...`);
             await sleep(retryDelay);
             return batchWriteToSheet(sheets, updates, retryCount + 1);
         } else {
             console.error(`  ❌ Sheet write FAILED after ${MAX_WRITE_RETRIES} retries: ${errorMessage}`);
-            // Log which rows failed so they can be identified
             const failedRows = updates.map(u => u.rowIndex + 1).join(', ');
             console.error(`  ❌ Failed rows: ${failedRows}`);
         }
@@ -335,7 +312,6 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
 
 // ============================================
 // UNIFIED EXTRACTION - ONE VISIT PER URL
-// Both metadata + video ID extracted on same page
 // ============================================
 async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink, attempt = 1) {
     const page = await browser.newPage();
@@ -346,96 +322,51 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         appSubtitle: 'NOT_FOUND'
     };
 
-    // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
         if (!name) return 'NOT_FOUND';
         let cleaned = name.trim();
-
-        // Remove invisible unicode
         cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
-
-        // Remove CSS-like patterns
         cleaned = cleaned.replace(/[a-zA-Z-]+\s*:\s*[^;]+;?/g, ' ');
         cleaned = cleaned.replace(/\d+px/g, ' ');
         cleaned = cleaned.replace(/\*+/g, ' ');
         cleaned = cleaned.replace(/\.[a-zA-Z][\w-]*/g, ' ');
-
-        // Remove special markers
         cleaned = cleaned.split('!@~!@~')[0];
         if (cleaned.includes('|')) {
             cleaned = cleaned.split('|')[0];
         }
-
-        // Normalize whitespace
         cleaned = cleaned.replace(/\s+/g, ' ').trim();
-
-        // Length check
         if (cleaned.length < 2 || cleaned.length > 80) return 'NOT_FOUND';
-
-        // Reject if looks like CSS
         if (/:\s*\d/.test(cleaned) || cleaned.includes('height') || cleaned.includes('width') || cleaned.includes('font')) {
             return 'NOT_FOUND';
         }
-
         return cleaned || 'NOT_FOUND';
     };
 
-    // ENHANCED ANTI-DETECTION - More comprehensive fingerprint masking
     const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
     await page.setUserAgent(userAgent);
 
     const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
     await page.setViewport(viewport);
 
-    // Random screen properties for more realistic fingerprint
     const screenWidth = viewport.width + Math.floor(Math.random() * 100) - 50;
     const screenHeight = viewport.height + Math.floor(Math.random() * 100) - 50;
 
     await page.evaluateOnNewDocument((screenW, screenH) => {
-        // Remove webdriver flag
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-        // Chrome runtime
         window.chrome = { runtime: {} };
-
-        // Plugins
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-            configurable: true
-        });
-
-        // Languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en'],
-            configurable: true
-        });
-
-        // Platform
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
         Object.defineProperty(navigator, 'platform', {
-            get: () => /Win/.test(navigator.userAgent) ? 'Win32' :
-                /Mac/.test(navigator.userAgent) ? 'MacIntel' : 'Linux x86_64',
+            get: () => /Win/.test(navigator.userAgent) ? 'Win32' : /Mac/.test(navigator.userAgent) ? 'MacIntel' : 'Linux x86_64',
             configurable: true
         });
-
-        // Hardware concurrency (randomize CPU cores)
-        Object.defineProperty(navigator, 'hardwareConcurrency', {
-            get: () => 4 + Math.floor(Math.random() * 4), // 4-8 cores
-            configurable: true
-        });
-
-        // Device memory (randomize RAM)
-        Object.defineProperty(navigator, 'deviceMemory', {
-            get: () => [4, 8, 16][Math.floor(Math.random() * 3)],
-            configurable: true
-        });
-
-        // Screen properties
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 + Math.floor(Math.random() * 4), configurable: true });
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => [4, 8, 16][Math.floor(Math.random() * 3)], configurable: true });
         Object.defineProperty(screen, 'width', { get: () => screenW, configurable: true });
         Object.defineProperty(screen, 'height', { get: () => screenH, configurable: true });
         Object.defineProperty(screen, 'availWidth', { get: () => screenW, configurable: true });
         Object.defineProperty(screen, 'availHeight', { get: () => screenH - 40, configurable: true });
 
-        // Permissions
         const originalQuery = window.navigator.permissions.query;
         window.navigator.permissions.query = (parameters) => (
             parameters.name === 'notifications' ?
@@ -443,14 +374,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 originalQuery(parameters)
         );
 
-        // Canvas fingerprint protection (add noise)
         const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
         HTMLCanvasElement.prototype.toDataURL = function () {
             const context = this.getContext('2d');
             if (context) {
                 const imageData = context.getImageData(0, 0, this.width, this.height);
                 for (let i = 0; i < imageData.data.length; i += 4) {
-                    imageData.data[i] += Math.random() * 0.01 - 0.005; // Tiny noise
+                    imageData.data[i] += Math.random() * 0.01 - 0.005;
                 }
                 context.putImageData(imageData, 0, 0);
             }
@@ -458,16 +388,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         };
     }, screenWidth, screenHeight);
 
-    // SPEED OPTIMIZATION - Block unnecessary resources
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
         const resourceType = request.resourceType();
         const blockedTypes = ['image', 'font', 'other'];
-        const blockedPatterns = [
-            'analytics', 'google-analytics', 'doubleclick',
-            'facebook.com', 'bing.com', 'logs', 'collect', 'securepubads'
-        ];
+        const blockedPatterns = ['analytics', 'google-analytics', 'doubleclick', 'facebook.com', 'bing.com', 'logs', 'collect', 'securepubads'];
 
         if (blockedTypes.includes(resourceType) || blockedPatterns.some(p => requestUrl.includes(p))) {
             request.abort();
@@ -479,7 +405,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     try {
         console.log(`  🚀 Loading (${viewport.width}x${viewport.height}): ${url.substring(0, 50)}...`);
 
-        // Random mouse movement before page load (more human-like)
         try {
             const client = await page.target().createCDPSession();
             await client.send('Input.dispatchMouseEvent', {
@@ -487,16 +412,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 x: Math.random() * viewport.width,
                 y: Math.random() * viewport.height
             });
-        } catch (e) { /* Ignore if CDP not ready */ }
+        } catch (e) { }
 
-        // Enhanced headers with randomization
-        const acceptLanguages = [
-            'en-US,en;q=0.9',
-            'en-US,en;q=0.9,zh-CN;q=0.8',
-            'en-US,en;q=0.9,fr;q=0.8',
-            'en-GB,en;q=0.9',
-            'en-US,en;q=0.9,es;q=0.8'
-        ];
+        const acceptLanguages = ['en-US,en;q=0.9', 'en-US,en;q=0.9,zh-CN;q=0.8', 'en-US,en;q=0.9,fr;q=0.8', 'en-GB,en;q=0.9', 'en-US,en;q=0.9,es;q=0.8'];
         await page.setExtraHTTPHeaders({
             'accept-language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
             'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -511,7 +429,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             'upgrade-insecure-requests': '1'
         });
 
-        // Increased wait strategy for accuracy - iframes need time to render content
         const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
 
         const content = await page.content();
@@ -526,12 +443,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (increased for large datasets)
-        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
+        const baseWait = 4000 + Math.random() * 2000;
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
-        // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
         try {
             await page.evaluate(async () => {
                 const iframes = document.querySelectorAll('iframe');
@@ -542,7 +457,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         const checkLoaded = () => {
                             loaded++;
                             if (loaded >= totalIframes) {
-                                setTimeout(resolve, 1500); // Extra time after all iframes load
+                                setTimeout(resolve, 1500);
                             }
                         };
                         iframes.forEach(iframe => {
@@ -551,28 +466,23 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     checkLoaded();
                                 } else {
                                     iframe.onload = checkLoaded;
-                                    // Timeout after 4 seconds per iframe
                                     setTimeout(checkLoaded, 4000);
                                 }
                             } catch (e) {
-                                // Cross-origin iframe, count as loaded
                                 checkLoaded();
                             }
                         });
-                        // If no iframes, resolve immediately
                         if (totalIframes === 0) resolve();
                     });
                 }
             });
         } catch (e) {
-            // If iframe check fails, wait a bit anyway
             await sleep(1000);
         }
 
-        // Random mouse movements for more human-like behavior
         try {
             const client = await page.target().createCDPSession();
-            const movements = 2 + Math.floor(Math.random() * 3); // 2-4 movements
+            const movements = 2 + Math.floor(Math.random() * 3);
             for (let i = 0; i < movements; i++) {
                 await client.send('Input.dispatchMouseEvent', {
                     type: 'mouseMoved',
@@ -581,33 +491,25 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 });
                 await sleep(200 + Math.random() * 300);
             }
-        } catch (e) { /* Ignore if CDP fails */ }
+        } catch (e) { }
 
-        // Human-like interaction (optimized for speed while staying safe)
         await page.evaluate(async () => {
-            // Quick but natural scrolling with random pauses
             for (let i = 0; i < 3; i++) {
                 window.scrollBy(0, 150 + Math.random() * 100);
                 await new Promise(r => setTimeout(r, 200 + Math.random() * 150));
-                // Random pause sometimes (30% chance)
                 if (Math.random() < 0.3) {
                     await new Promise(r => setTimeout(r, 300 + Math.random() * 200));
                 }
             }
-            // Scroll back up a bit
             window.scrollBy(0, -100);
             await new Promise(r => setTimeout(r, 250));
         });
 
-        // Random pause before extraction (10-30% chance, adds randomness)
         if (Math.random() < 0.2) {
             const randomPause = 500 + Math.random() * 1000;
             await sleep(randomPause);
         }
 
-        // =====================================================
-        // PHASE 1: METADATA EXTRACTION
-        // =====================================================
         let mainPageInfo = null;
         if (needsMetadata) {
             console.log(`  📊 Extracting metadata...`);
@@ -622,13 +524,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     return text;
                 };
 
-                const advertiserSelectors = [
-                    '.advertiser-name',
-                    '.advertiser-name-container',
-                    'h1',
-                    '.creative-details-page-header-text',
-                    '.ad-details-heading'
-                ];
+                const advertiserSelectors = ['.advertiser-name', '.advertiser-name-container', 'h1', '.creative-details-page-header-text', '.ad-details-heading'];
 
                 let advertiserName = null;
                 for (const sel of advertiserSelectors) {
@@ -659,16 +555,67 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         const data = { appName: null, storeLink: null, appSubtitle: null, isVideo: false };
                         const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                        // Check if this frame content is visible (has dimensions)
                         const bodyRect = document.body.getBoundingClientRect();
                         if (bodyRect.width < 50 || bodyRect.height < 50) {
                             return { ...data, isHidden: true };
                         }
 
-                        // =====================================================
-                        // ULTRA-PRECISE STORE LINK EXTRACTOR
-                        // Only accepts REAL Play Store / App Store links
-                        // =====================================================
+                        const findPackageName = () => {
+                            const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
+                            const foundPackages = new Set();
+
+                            const allLinks = root.querySelectorAll('a[href]');
+                            for (const link of allLinks) {
+                                const href = link.href || '';
+                                const idMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                                if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
+                                    foundPackages.add(idMatch[1]);
+                                }
+                                const matches = href.match(packageRegex);
+                                if (matches) matches.forEach(m => foundPackages.add(m));
+                            }
+
+                            const allElements = root.querySelectorAll('*');
+                            for (const el of allElements) {
+                                for (const attr of el.attributes || []) {
+                                    const val = attr.value || '';
+                                    const matches = val.match(packageRegex);
+                                    if (matches) matches.forEach(m => foundPackages.add(m));
+                                    const idMatch = val.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                                    if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
+                                        foundPackages.add(idMatch[1]);
+                                    }
+                                }
+                            }
+
+                            const scripts = root.querySelectorAll('script');
+                            for (const script of scripts) {
+                                const content = script.textContent || '';
+                                const matches = content.match(packageRegex);
+                                if (matches) matches.forEach(m => foundPackages.add(m));
+                            }
+
+                            const html = root.innerHTML || '';
+                            const htmlMatches = html.match(packageRegex);
+                            if (htmlMatches) htmlMatches.forEach(m => foundPackages.add(m));
+
+                            const blacklistPatterns = ['com.google.android', 'com.android.', 'schema.org', 'w3.org'];
+                            const validPackages = [...foundPackages].filter(pkg => {
+                                if (pkg.length < 5 || pkg.length > 100) return false;
+                                if (blacklistPatterns.some(bp => pkg.startsWith(bp))) return false;
+                                if (pkg.split('.').length < 2) return false;
+                                return true;
+                            });
+
+                            const comPackages = validPackages.filter(p => p.startsWith('com.'));
+                            return comPackages[0] || validPackages[0] || null;
+                        };
+
+                        const buildPlayStoreUrl = (packageName) => {
+                            if (!packageName) return null;
+                            return `https://play.google.com/store/apps/details?id=${packageName}`;
+                        };
+
                         const extractStoreLink = (href) => {
                             if (!href || typeof href !== 'string') return null;
                             if (href.includes('javascript:') || href === '#') return null;
@@ -684,11 +631,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
                             if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
                                 try {
-                                    const patterns = [
-                                        /[?&]adurl=([^&\s]+)/i,
-                                        /[?&]dest=([^&\s]+)/i,
-                                        /[?&]url=([^&\s]+)/i
-                                    ];
+                                    const patterns = [/[?&]adurl=([^&\s]+)/i, /[?&]dest=([^&\s]+)/i, /[?&]url=([^&\s]+)/i];
                                     for (const pattern of patterns) {
                                         const match = href.match(pattern);
                                         if (match && match[1]) {
@@ -704,14 +647,16 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (playMatch && playMatch[1]) return playMatch[1];
                                 const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
                                 if (appMatch && appMatch[1]) return appMatch[1];
+
+                                const pkgMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                                if (pkgMatch && pkgMatch[1] && pkgMatch[1].includes('.')) {
+                                    return buildPlayStoreUrl(pkgMatch[1]);
+                                }
                             } catch (e) { }
 
                             return null;
                         };
 
-                        // =====================================================
-                        // CLEAN APP NAME
-                        // =====================================================
                         const cleanAppName = (text) => {
                             if (!text || typeof text !== 'string') return null;
                             let clean = text.trim();
@@ -729,11 +674,30 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             return clean;
                         };
 
-                        // =====================================================
-                        // EXTRACTION - Find FIRST element with BOTH name + store link
-                        // Uses PRECISE selectors from app_data_agent.js
-                        // =====================================================
-                        const appNameSelectors = [
+                        const appNameDivSelectors = [
+                            'div.KDwhZb-Gxk8ed-r4nke',
+                            'div[class*="KDwhZb-Gxk8ed-r4nke"]',
+                            'div[class*="KDwhZb"][class*="Gxk8ed"]',
+                            'div.cS4Vcb-kb9wTc',
+                            'div[class*="cS4Vcb-kb9wTc"]',
+                            'div[class*="cS4Vcb-pGL6qe-c0XB9d"]'
+                        ];
+
+                        for (const selector of appNameDivSelectors) {
+                            const elements = root.querySelectorAll(selector);
+                            for (const el of elements) {
+                                const span = el.querySelector('span');
+                                const rawName = span ? (span.innerText || span.textContent || '') : (el.innerText || el.textContent || '');
+                                const appName = cleanAppName(rawName);
+                                if (appName && appName.toLowerCase() !== blacklist && appName.length > 2) {
+                                    data.appName = appName;
+                                    break;
+                                }
+                            }
+                            if (data.appName) break;
+                        }
+
+                        const appLinkSelectors = [
                             'a[data-asoch-targets*="ochAppName"]',
                             'a[data-asoch-targets*="appname" i]',
                             'a[data-asoch-targets*="rrappname" i]',
@@ -741,28 +705,34 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             '.short-app-name a'
                         ];
 
-                        for (const selector of appNameSelectors) {
+                        for (const selector of appLinkSelectors) {
                             const elements = root.querySelectorAll(selector);
                             for (const el of elements) {
-                                const rawName = el.innerText || el.textContent || '';
-                                const appName = cleanAppName(rawName);
-                                if (!appName || appName.toLowerCase() === blacklist) continue;
-
                                 const storeLink = extractStoreLink(el.href);
-                                if (appName && storeLink) {
-                                    return { appName, storeLink, isVideo: true, isHidden: false };
-                                } else if (appName && !data.appName) {
-                                    data.appName = appName;
+
+                                if (!data.appName) {
+                                    const rawName = el.innerText || el.textContent || '';
+                                    const appName = cleanAppName(rawName);
+                                    if (appName && appName.toLowerCase() !== blacklist) {
+                                        data.appName = appName;
+                                    }
+                                }
+
+                                if (data.appName && storeLink) {
+                                    return { appName: data.appName, storeLink, appSubtitle: data.appSubtitle, isVideo: true, isHidden: false };
+                                } else if (storeLink && !data.storeLink) {
+                                    data.storeLink = storeLink;
                                 }
                             }
                         }
 
-                        // Backup: Install button for link
-                        if (data.appName && !data.storeLink) {
+                        if (!data.storeLink) {
                             const installSels = [
                                 'a[data-asoch-targets*="ochButton"]',
                                 'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]'
+                                'a[aria-label*="Install" i]',
+                                'a[href*="play.google.com"]',
+                                'a[href*="apps.apple.com"]'
                             ];
                             for (const sel of installSels) {
                                 const el = root.querySelector(sel);
@@ -777,9 +747,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
-                        // Fallback for app name only
+                        if (!data.storeLink) {
+                            const packageName = findPackageName();
+                            if (packageName) {
+                                data.storeLink = buildPlayStoreUrl(packageName);
+                            }
+                        }
+
                         if (!data.appName) {
-                            const textSels = ['[role="heading"]', 'div[class*="app-name"]', '.app-title'];
+                            const textSels = ['div[class*="KDwhZb"] span', '[role="heading"]', 'div[class*="app-name"]', '.app-title'];
                             for (const sel of textSels) {
                                 const elements = root.querySelectorAll(sel);
                                 for (const el of elements) {
@@ -794,9 +770,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
-                        // =====================================================
-                        // EXTRACT APP SUBTITLE/HEADLINE using cS4Vcb-vnv8ic class
-                        // =====================================================
                         if (!data.appSubtitle) {
                             const subtitleSelectors = [
                                 '.cS4Vcb-vnv8ic',
@@ -813,9 +786,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 for (const el of els) {
                                     let text = (el.innerText || el.textContent || '').trim();
                                     text = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
-                                    // Skip if same as app name or too short/long
                                     if (text && text.length > 2 && text.length < 150 && text !== data.appName) {
-                                        // Filter out button text
                                         const lower = text.toLowerCase();
                                         const blacklistSub = ['install', 'open', 'download', 'play', 'get', 'ad details', 'google play'];
                                         if (!blacklistSub.some(b => lower === b)) {
@@ -832,15 +803,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         return data;
                     }, blacklistName);
 
-                    // Skip hidden frames
                     if (frameData.isHidden) continue;
 
-                    // Capture subtitle if found
                     if (frameData.appSubtitle && result.appSubtitle === 'NOT_FOUND') {
                         result.appSubtitle = frameData.appSubtitle;
                     }
 
-                    // If we found BOTH app name AND store link, use this immediately (high confidence)
                     if (frameData.appName && frameData.storeLink && result.appName === 'NOT_FOUND') {
                         result.appName = cleanName(frameData.appName);
                         result.storeLink = frameData.storeLink;
@@ -848,18 +816,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         if (result.appSubtitle !== 'NOT_FOUND') {
                             console.log(`  ✓ Subtitle: ${result.appSubtitle}`);
                         }
-                        break; // We have both, stop searching
+                        break;
                     }
 
-                    // If we only found name (no link), store it but keep looking
                     if (frameData.appName && !frameData.storeLink && result.appName === 'NOT_FOUND') {
                         result.appName = cleanName(frameData.appName);
-                        // DON'T break - continue looking for a frame with BOTH name+link
                     }
                 } catch (e) { }
             }
 
-            // Final fallback from Meta/Title
             if (result.appName === 'NOT_FOUND' || result.appName === 'Ad Details') {
                 try {
                     const title = await page.title();
@@ -894,7 +859,6 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
-        // Success criteria: found at least app name or store link
         const success = data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND';
 
         if (success) {
@@ -905,7 +869,6 @@ async function extractWithRetry(item, browser) {
 
         await randomDelay(2000, 4000);
     }
-    // If we're here, we exhausted retries. Return whatever we have.
     return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', appSubtitle: 'NOT_FOUND' };
 }
 
@@ -913,7 +876,7 @@ async function extractWithRetry(item, browser) {
 // MAIN EXECUTION
 // ============================================
 (async () => {
-    console.log(`🤖 Starting App Name Extraction Agent (BOTTOM TO TOP)...\n`);
+    console.log(`🤖 Starting App Name Extraction Agent (TOP TO BOTTOM)...\n`);
     console.log(`📋 Sheet: ${SHEET_NAME}`);
     console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, F=Subtitle\n`);
 
@@ -929,11 +892,11 @@ async function extractWithRetry(item, browser) {
     }
 
     const needsMeta = toProcess.filter(x => x.needsMetadata).length;
-    console.log(`📊 Found ${toProcess.length} rows to process (from bottom to top)\n`);
+    console.log(`📊 Found ${toProcess.length} rows to process (from top to bottom)\n`);
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-    const PAGES_PER_BROWSER = 30; // Balanced: faster but safe
+    const PAGES_PER_BROWSER = 30;
     let currentIndex = 0;
     let consecutiveSuccessBatches = 0;
 
@@ -986,7 +949,6 @@ async function extractWithRetry(item, browser) {
 
         let sessionProcessed = 0;
         let blocked = false;
-        // Reset adaptive counter for each browser session
         consecutiveSuccessBatches = 0;
 
         while (sessionProcessed < currentSessionSize && !blocked) {
@@ -996,12 +958,10 @@ async function extractWithRetry(item, browser) {
             console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length}`);
 
             try {
-                // Stagger page loads to avoid blocks - add delay between each concurrent page
                 const results = await Promise.all(batch.map(async (item, index) => {
-                    // Add random delay before starting each page (staggered)
                     if (index > 0) {
                         const staggerDelay = PAGE_LOAD_DELAY_MIN + Math.random() * (PAGE_LOAD_DELAY_MAX - PAGE_LOAD_DELAY_MIN);
-                        await sleep(staggerDelay * index); // Each page waits progressively longer
+                        await sleep(staggerDelay * index);
                     }
                     const data = await extractWithRetry(item, browser);
                     return {
@@ -1017,39 +977,31 @@ async function extractWithRetry(item, browser) {
                     console.log(`  → Row ${r.rowIndex + 1}: Name=${r.appName} | Subtitle=${r.appSubtitle?.substring(0, 30) || 'NOT_FOUND'}... | Link=${r.storeLink?.substring(0, 40) || 'NOT_FOUND'}`);
                 });
 
-                // Separate successful results from blocked ones (for logging)
                 const successfulResults = results.filter(r => r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED');
                 const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
 
-                // WRITE ALL RESULTS TO SHEET (including blocked ones)
-                // This ensures blocked rows get marked and won't be reprocessed
                 if (results.length > 0) {
                     await batchWriteToSheet(sheets, results);
                     console.log(`  ✅ Wrote ${results.length} results to sheet (${successfulResults.length} successful, ${blockedResults.length} blocked)`);
-
-                    // Add cooldown after each write to prevent rate limits
-                    await sleep(1000 + Math.random() * 1000); // 1-2 second cooldown
+                    await sleep(1000 + Math.random() * 1000);
                 }
 
-                // Progress status every 10 batches
                 if ((currentIndex / batchSize) % 10 === 0) {
                     const elapsed = Math.floor((Date.now() - sessionStartTime) / 60000);
                     const remaining = toProcess.length - currentIndex;
                     console.log(`\n📊 PROGRESS: ${currentIndex}/${toProcess.length} processed (${remaining} remaining) | Runtime: ${elapsed} mins\n`);
                 }
 
-                // If any results were blocked, mark for browser rotation
                 if (blockedResults.length > 0) {
                     console.log(`  🛑 Block detected (${blockedResults.length} blocked, ${successfulResults.length} successful). Closing browser and rotating...`);
                     proxyStats.totalBlocks++;
                     proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
                     blocked = true;
-                    consecutiveSuccessBatches = 0; // Reset on block
+                    consecutiveSuccessBatches = 0;
                 } else {
-                    consecutiveSuccessBatches++; // Track successful batches
+                    consecutiveSuccessBatches++;
                 }
 
-                // Update index for all processed items (both successful and blocked)
                 currentIndex += batchSize;
                 sessionProcessed += batchSize;
             } catch (err) {
@@ -1059,8 +1011,7 @@ async function extractWithRetry(item, browser) {
             }
 
             if (!blocked) {
-                // Adaptive delay: reduce delay if we're having success (faster processing)
-                const adaptiveMultiplier = Math.max(0.7, 1 - (consecutiveSuccessBatches * 0.05)); // Reduce delay by 5% per successful batch, min 70%
+                const adaptiveMultiplier = Math.max(0.7, 1 - (consecutiveSuccessBatches * 0.05));
                 const adjustedMin = BATCH_DELAY_MIN * adaptiveMultiplier;
                 const adjustedMax = BATCH_DELAY_MAX * adaptiveMultiplier;
                 const batchDelay = adjustedMin + Math.random() * (adjustedMax - adjustedMin);

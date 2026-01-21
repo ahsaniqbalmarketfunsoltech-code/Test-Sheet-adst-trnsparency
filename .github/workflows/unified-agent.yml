@@ -1,4 +1,4 @@
-name: Unified Google Ads Agent
+name: Unified Google Ads Agent (Bottom to Top)
 
 on:
   # Manual trigger
@@ -8,6 +8,11 @@ on:
         description: 'Sheet/Tab name to process'
         required: false
         default: 'Test'
+        type: string
+      auto_restart:
+        description: 'Auto restart after completion'
+        required: false
+        default: 'true'
         type: string
 
 jobs:
@@ -67,3 +72,20 @@ jobs:
             *.log
             npm-debug.log*
           retention-days: 7
+
+      - name: Wait 3 minutes before restart
+        if: always() && inputs.auto_restart != 'false'
+        run: |
+          echo "⏳ Waiting 3 minutes before auto-restart..."
+          sleep 180
+
+      - name: Auto-restart workflow
+        if: always() && inputs.auto_restart != 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔄 Triggering workflow restart..."
+          gh workflow run "unified-agent.yml" \
+            -f sheet_name="${{ inputs.sheet_name || 'Test' }}" \
+            -f auto_restart="true"
+          echo "✅ Workflow restart triggered!"
