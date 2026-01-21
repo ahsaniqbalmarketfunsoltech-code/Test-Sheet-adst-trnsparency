@@ -255,13 +255,25 @@ async function extractFullHTML(url, browser, attempt = 1) {
                         return t.length > 2 && t.length < 150;
                     };
 
-                    // 1. Package ID (META)
+                    // 1. Package ID (Strategy A: META)
                     const metas = document.querySelectorAll('meta[data-asoch-meta]');
                     for (const m of metas) {
                         const c = m.getAttribute('data-asoch-meta');
                         if (c) {
                             const match = c.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
                             if (match) { d.pkg = match[1] || match[2]; break; }
+                        }
+                    }
+
+                    // 1b. Package ID (Strategy B: Direct Link Fallback)
+                    if (!d.pkg) {
+                        const playLinks = document.querySelectorAll('a[href*="play.google.com/store/apps/details"]');
+                        for (const link of playLinks) {
+                            const href = link.getAttribute('href'); // Use getAttribute to avoid full URL resolution if needed, though matching works better on full string often.
+                            if (href) {
+                                const match = href.match(/id=([a-zA-Z0-9._]+)/);
+                                if (match) { d.pkg = match[1]; break; }
+                            }
                         }
                     }
 
