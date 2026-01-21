@@ -87,32 +87,47 @@ async function getGoogleSheetsClient() {
 
 async function getUrlData(sheets) {
     const toProcess = [];
-    const range = `${SHEET_NAME}!A2:G10000`;
+    const range = `${SHEET_NAME}!A2:G100000`; // Scan up to 100,000 rows
 
     try {
+        console.log(`📊 Reading whole sheet (${SHEET_NAME})...`);
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
             range: range,
         });
 
         const rows = response.data.values || [];
+        console.log(`✅ Total rows found in sheet: ${rows.length + 1}`);
 
-        for (let i = 0; i < rows.length && toProcess.length < MAX_URLS_TO_TEST; i++) {
+        for (let i = 0; i < rows.length; i++) {
             const row = rows[i];
             const actualRowIndex = i + 1;
             const url = row[1]?.trim() || '';
             const storeLink = row[2]?.trim() || '';
 
             if (!url) continue;
-            if (storeLink && storeLink.trim() !== '') continue;
 
-            toProcess.push({
-                url,
-                rowIndex: actualRowIndex,
-                rowNumber: actualRowIndex + 1,
-                needsMetadata: true
-            });
+            // Criteria: Empty Column C
+            if (!storeLink || storeLink.trim() === '') {
+                // Determine if this is the first work item to log where we started
+                if (toProcess.length === 0) {
+                    console.log(`🔍 Work starts at Row ${actualRowIndex + 1}`);
+                }
+
+                toProcess.push({
+                    url,
+                    rowIndex: actualRowIndex,
+                    rowNumber: actualRowIndex + 1,
+                    needsMetadata: true
+                });
+
+                // Respect the cap if set via ENV, otherwise process ALL
+                if (toProcess.length >= MAX_URLS_TO_TEST) break;
+            }
         }
+
+        console.log(`🎯 Found ${toProcess.length} empty rows needing data.`);
+        console.log(`🚀 Starting sequential processing (one-by-one from Row ${toProcess[0]?.rowNumber || 'N/A'})...\n`);
         return toProcess;
     } catch (error) {
         console.error(`❌ Error loading sheet data: ${error.message}`);
@@ -295,15 +310,19 @@ async function extractFullHTML(url, browser, attempt = 1) {
             }
 
             if (res && res.success) {
+                // ALWAYS write all 3 columns
                 await writeToSheet(sheets, item.rowIndex, res.packageName, res.appName, res.appSubtitle);
             } else {
+                // ON FAILURE: ALWAYS write NOT_FOUND to all 3 columns so the row is marked as processed
+                console.log(`   ❌ Extraction failed, writing NOT_FOUND to columns C, D, F`);
                 await writeToSheet(sheets, item.rowIndex, 'NOT_FOUND', 'NOT_FOUND', 'NOT_FOUND');
             }
             await sleep(PAGE_LOAD_DELAY);
         }
 
         await browser.close();
-        console.log('\n🏁 Finished processing all rows.');
+        console.log('\n🏁 Finished processing all requested rows.');
+        console.log(`✅ Every empty row encountered was written to Column C, D, and F.`);
     } catch (error) {
         console.error(`\n❌ Fatal error: ${error.message}`);
         process.exit(1);
