@@ -336,6 +336,16 @@ async function extractAppName(url, browser, attempt = 1) {
             return 'NOT_FOUND';
         }
 
+        // Filter out UI elements / blacklisted words
+        const blacklistWords = [
+            'ad details', 'advertiser details', 'google ads', 'transparency center', 'about this ad',
+            'install', 'open', 'download', 'play', 'get', 'creative details'
+        ];
+        const lowerCleaned = cleaned.toLowerCase();
+        if (blacklistWords.some(word => lowerCleaned === word || lowerCleaned.includes(word))) {
+            return 'NOT_FOUND';
+        }
+
         return cleaned || 'NOT_FOUND';
     };
 
@@ -600,9 +610,15 @@ async function extractAppName(url, browser, attempt = 1) {
                         if (clean.length < 2 || clean.length > 80) return null;
                         if (/^[\d\s\W]+$/.test(clean)) return null;
                         
-                        // Filter out blacklisted words
-                        const blacklistWords = ['ad details', 'google ads', 'transparency center', 'about this ad', 'install', 'open', 'download', 'play', 'get'];
-                        if (blacklistWords.some(word => clean.toLowerCase() === word || (clean.toLowerCase().includes(word) && clean.length < 15))) return null;
+                        // Filter out blacklisted words (UI elements, buttons, etc.)
+                        const blacklistWords = [
+                            'ad details', 'advertiser details', 'google ads', 'transparency center', 'about this ad',
+                            'install', 'open', 'download', 'play', 'get', 'more', 'visit site', 'learn more',
+                            'creative details', 'ad format', 'format:', 'region:', 'date:', 'last shown',
+                            'see more ads', 'report ad', 'why this ad', 'close', 'skip'
+                        ];
+                        const lowerClean = clean.toLowerCase();
+                        if (blacklistWords.some(word => lowerClean === word || lowerClean.includes(word))) return null;
                         
                         return clean;
                     };
