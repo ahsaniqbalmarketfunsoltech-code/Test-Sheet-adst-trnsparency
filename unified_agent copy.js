@@ -153,14 +153,13 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
 
                 if (!url) continue;
 
-                // SKIP: Rows with Play Store link in Column C
-                const hasPlayStoreLink = storeLink && storeLink.includes('play.google.com');
-                if (hasPlayStoreLink) {
-                    continue; // Skip - already has Play Store link
+                // NEW CRITERIA: ONLY process if Column C (storeLink) is EMPTY
+                if (storeLink && storeLink.trim() !== '') {
+                    continue; // Skip - already has data in Column C
                 }
 
-                // Process rows that need extraction (app name, app link, or app headline)
-                const needsMetadata = !storeLink || storeLink === 'NOT_FOUND' || !appName || !appSubtitle;
+                // Process rows that need extraction
+                const needsMetadata = true; // Since it is empty, it needs metadata
                 toProcess.push({
                     url,
                     rowIndex: actualRowIndex,
@@ -266,7 +265,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
         // Length check
         if (cleaned.length < 2 || cleaned.length > 80) return 'NOT_FOUND';
 
-        // Reject if looks like CSS
+        // Reject if looks like CSS or generic text
+        const lowerClean = cleaned.toLowerCase();
+        if (lowerClean === 'ad details' || lowerClean === 'google ads' || lowerClean === 'sponsored' || lowerClean === 'advertisement') {
+            return 'NOT_FOUND';
+        }
+
         if (/:\s*\d/.test(cleaned) || cleaned.includes('height') || cleaned.includes('width') || cleaned.includes('font')) {
             return 'NOT_FOUND';
         }
@@ -622,6 +626,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                 if (parts.length > 0) clean = parts[0];
                             }
                             clean = clean.replace(/\s+/g, ' ').trim();
+
+                            // BLACKLIST CHECK: Avoid generic text
+                            const lowerClean = clean.toLowerCase();
+                            if (lowerClean === 'ad details' || lowerClean === 'google ads' || lowerClean === 'sponsored' || lowerClean === 'advertisement') {
+                                return null;
+                            }
+
                             if (clean.length < 2 || clean.length > 80) return null;
                             if (/^[\d\s\W]+$/.test(clean)) return null;
                             return clean;
