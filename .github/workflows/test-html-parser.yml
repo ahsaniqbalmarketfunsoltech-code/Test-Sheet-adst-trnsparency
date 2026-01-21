@@ -76,11 +76,7 @@ jobs:
       
       - name: Create credentials file
         run: |
-          if [ -z "${{ secrets.GOOGLE_CREDENTIALS }}" ]; then
-            echo "❌ GOOGLE_CREDENTIALS secret not set"
-            exit 1
-          fi
-          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
+          echo "$GOOGLE_CREDENTIALS" > credentials.json
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       
@@ -95,6 +91,7 @@ jobs:
           PAGE_LOAD_DELAY: ${{ env.PAGE_LOAD_DELAY }}
           WAIT_AFTER_LOAD: ${{ env.WAIT_AFTER_LOAD }}
           RETRY_DELAY: ${{ env.RETRY_DELAY }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           # Optional: Add proxy support via secrets
           PROXIES: ${{ secrets.PROXIES }}
           # Puppeteer will auto-detect Chromium from node_modules

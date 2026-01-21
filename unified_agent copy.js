@@ -77,7 +77,39 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // GOOGLE SHEETS
 // ============================================
 async function getGoogleSheetsClient() {
-    const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
+    let credentials;
+
+    // Priority 1: Environment Variable (most secure for CI)
+    if (process.env.GOOGLE_CREDENTIALS) {
+        try {
+            credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+        } catch (err) {
+            console.error('❌ Error parsing GOOGLE_CREDENTIALS environment variable.');
+            console.error('   Make sure the secret is a valid JSON string.');
+            throw err;
+        }
+    }
+    // Priority 2: Credentials File
+    else if (fs.existsSync(CREDENTIALS_PATH)) {
+        try {
+            const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+            if (content.trim().startsWith('***')) {
+                throw new Error('Credentials file contains masked secret (***). This usually happens when the secret is piped incorrectly in CI.');
+            }
+            credentials = JSON.parse(content);
+        } catch (err) {
+            console.error(`❌ Error parsing ${CREDENTIALS_PATH}`);
+            console.error(`   Error: ${err.message}`);
+            if (err.message.includes('JSON')) {
+                const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+                console.error(`   File starts with: "${content.substring(0, 20)}..."`);
+            }
+            throw err;
+        }
+    } else {
+        throw new Error(`Google credentials not found. Set GOOGLE_CREDENTIALS env var or create ${CREDENTIALS_PATH}`);
+    }
+
     const auth = new google.auth.GoogleAuth({
         credentials,
         scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -169,15 +201,15 @@ async function batchWriteToSheet(sheets, updates) {
     // Write ONLY: App Link (C), App Name (D), App Headline (F)
     updates.forEach(({ rowIndex, storeLink, appName, appSubtitle }) => {
         const rowNum = rowIndex + 1;
-        
+
         // Write store link (Column C) - ALWAYS write
         const storeLinkValue = storeLink && storeLink !== 'SKIP' ? storeLink : 'NOT_FOUND';
         data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
-        
+
         // Write app name (Column D) - ALWAYS write
         const appNameValue = appName && appName !== 'SKIP' ? appName : 'NOT_FOUND';
         data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appNameValue]] });
-        
+
         // Write app headline/subtitle (Column F) - ALWAYS write
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
         data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
@@ -497,17 +529,17 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                 // Get the FIRST meta tag with data-asoch-meta (as user specified)
                                 const firstMetaTag = root.querySelector('meta[data-asoch-meta]');
                                 if (!firstMetaTag) return null;
-                                
+
                                 const metaData = firstMetaTag.getAttribute('data-asoch-meta');
                                 if (!metaData) return null;
-                                
+
                                 // Debug: count all meta tags found
                                 const allMetaTags = root.querySelectorAll('meta[data-asoch-meta]');
                                 data.metaTagCount = allMetaTags.length;
-                                
+
                                 // Extract package name directly from the FIRST meta tag
                                 // Try multiple patterns to find the package name
-                                
+
                                 // Pattern 1: Direct regex extraction (fastest)
                                 const fastPackageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
                                 if (fastPackageMatch) {
@@ -516,7 +548,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                         return `https://play.google.com/store/apps/details?id=${packageName}`;
                                     }
                                 }
-                                
+
                                 // Pattern 2: Parse JSON and extract from ad0 entry
                                 try {
                                     const parsed = JSON.parse(metaData);
@@ -541,7 +573,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                                 }
                                                             } catch (e) { }
                                                         }
-                                                        
+
                                                         // Extract package directly from URL string
                                                         const pkgMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
                                                         if (pkgMatch) {
@@ -564,7 +596,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                             }
                             return null;
                         };
-                        
+
                         // =====================================================
                         // EXTRACT STORE LINK - ONLY FROM FIRST META DATA-ASOCH-META
                         // This is the ONLY method to extract store links
@@ -612,7 +644,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                 const rawName = el.innerText || el.textContent || '';
                                 const appName = cleanAppName(rawName);
                                 if (!appName || appName.toLowerCase() === blacklist) continue;
-                                
+
                                 // Only extract app name, NOT store link (store link comes from meta tag only)
                                 if (appName && !data.appName) {
                                     data.appName = appName;
@@ -668,7 +700,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                     // If TEXT AD detected: Focus on store link extraction, skip other work
                     if (isTextAd) {
                         console.log(`  📝 TEXT AD DETECTED: Found name + subtitle - focusing on store link extraction`);
-                        
+
                         // Store the name and subtitle if found
                         if (foundAppName) {
                             result.appName = cleanName(frameData.appName);
@@ -676,14 +708,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         if (foundSubtitle) {
                             result.appSubtitle = frameData.appSubtitle;
                         }
-                        
+
                         // PRIORITY: Extract store link for text ads
                         if (frameData.storeLink && result.storeLink === 'NOT_FOUND') {
                             result.storeLink = frameData.storeLink;
                             console.log(`  ✓ TEXT AD COMPLETE: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
                             break; // Text ad complete, stop searching
                         }
-                        
+
                         // Continue looking for store link in other frames
                         continue;
                     }
@@ -708,7 +740,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         result.appName = cleanName(frameData.appName);
                         // DON'T break - continue looking
                     }
-                    
+
                     // If we only found store link (no name), keep it but continue looking for name
                     if (frameData.storeLink && !frameData.appName && result.storeLink === 'NOT_FOUND') {
                         result.storeLink = frameData.storeLink;
@@ -725,10 +757,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                             // Get the FIRST meta tag with data-asoch-meta (as user specified)
                             const firstMetaTag = document.querySelector('meta[data-asoch-meta]');
                             if (!firstMetaTag) return null;
-                            
+
                             const metaData = firstMetaTag.getAttribute('data-asoch-meta');
                             if (!metaData) return null;
-                            
+
                             // Extract package name directly from the FIRST meta tag
                             // Pattern 1: Direct regex extraction (fastest)
                             const fastPackageMatch = metaData.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
@@ -738,7 +770,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                     return `https://play.google.com/store/apps/details?id=${packageName}`;
                                 }
                             }
-                            
+
                             // Pattern 2: Parse JSON and extract from ad0 entry
                             try {
                                 const parsed = JSON.parse(metaData);
@@ -763,7 +795,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                             }
                                                         } catch (e) { }
                                                     }
-                                                    
+
                                                     // Extract package directly from URL string
                                                     const pkgMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
                                                     if (pkgMatch) {
@@ -786,7 +818,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         }
                         return null;
                     });
-                    
+
                     if (metaStoreLink) {
                         result.storeLink = metaStoreLink;
                         console.log(`  ✓ Found store link from meta tag: ${result.storeLink.substring(0, 60)}...`);
@@ -812,42 +844,42 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
             // =====================================================
             // Only extract subtitle if we have app name (text ad detection)
             const isTextAdForSubtitle = result.appName && result.appName !== 'NOT_FOUND' && result.appName !== 'Ad Details';
-            
+
             if (needsMetadata && result.appSubtitle === 'NOT_FOUND' && isTextAdForSubtitle) {
                 // Run subtitle extraction in a separate try-catch to ensure it doesn't block other extractions
                 try {
                     console.log(`  📝 Extracting subtitle for text ad (cS4Vcb-vnv8ic)...`);
-                    
+
                     // Reduced wait for dynamic content (optimized for speed)
                     await sleep(500 + Math.random() * 300); // Reduced from 1000-1500ms to 500-800ms
-                    
+
                     const client = await page.target().createCDPSession();
-                    
+
                     // First, try extracting from iframes (most common location for ad creatives)
                     const frames = page.frames();
                     console.log(`  🔍 Checking ${frames.length} iframes for subtitle...`);
-                    
+
                     for (const frame of frames) {
                         try {
                             // Find subtitle elements in this frame - try multiple selectors
                             const subtitleInfo = await frame.evaluate(() => {
                                 const root = document.querySelector('#portrait-landscape-phone') || document.body;
-                                
+
                                 // Try exact class first
                                 let subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
-                                
+
                                 // If not found, try partial match
                                 if (subtitleEls.length === 0) {
                                     subtitleEls = root.querySelectorAll('[class*="cS4Vcb"][class*="vnv8ic"]');
                                 }
-                                
+
                                 // If still not found, try any element with vnv8ic
                                 if (subtitleEls.length === 0) {
                                     subtitleEls = root.querySelectorAll('[class*="vnv8ic"]');
                                 }
-                                
+
                                 const elements = [];
-                                
+
                                 for (const el of subtitleEls) {
                                     const rect = el.getBoundingClientRect();
                                     if (rect.width > 0 && rect.height > 0) {
@@ -870,10 +902,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                         }
                                     }
                                 }
-                                
+
                                 // Sort by area (larger elements are more likely to be the main subtitle)
                                 elements.sort((a, b) => b.area - a.area);
-                                
+
                                 return elements;
                             });
 
@@ -890,13 +922,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                             if (iframeRect) {
                                                 const absoluteX = iframeRect.x + subtitleEl.x;
                                                 const absoluteY = iframeRect.y + subtitleEl.y;
-                                                
+
                                                 // Scroll to element first to ensure it's visible
                                                 await page.evaluate((x, y) => {
                                                     window.scrollTo(x - window.innerWidth / 2, y - window.innerHeight / 2);
                                                 }, absoluteX, absoluteY);
                                                 await sleep(200); // Reduced from 300ms
-                                                
+
                                                 // Hover on the subtitle element
                                                 await client.send('Input.dispatchMouseEvent', {
                                                     type: 'mouseMoved',
@@ -904,26 +936,26 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                     y: absoluteY
                                                 });
                                                 await sleep(400 + Math.random() * 200); // Reduced: 400-600ms (was 800-1200ms)
-                                                
+
                                                 // After hover, extract the text from the subtitle element
                                                 const hoveredText = await frame.evaluate(() => {
                                                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
-                                                    
+
                                                     // Try exact class first
                                                     let subtitleEls = root.querySelectorAll('.cS4Vcb-vnv8ic');
-                                                    
+
                                                     // If not found, try partial match
                                                     if (subtitleEls.length === 0) {
                                                         subtitleEls = root.querySelectorAll('[class*="cS4Vcb"][class*="vnv8ic"]');
                                                     }
-                                                    
+
                                                     // If still not found, try any element with vnv8ic
                                                     if (subtitleEls.length === 0) {
                                                         subtitleEls = root.querySelectorAll('[class*="vnv8ic"]');
                                                     }
-                                                    
+
                                                     const candidates = [];
-                                                    
+
                                                     // Return first valid subtitle in ad creative area (after hover, this should be the correct one)
                                                     for (const el of subtitleEls) {
                                                         const rect = el.getBoundingClientRect();
@@ -940,13 +972,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                                             }
                                                         }
                                                     }
-                                                    
+
                                                     // Return the largest element (most likely the main subtitle)
                                                     if (candidates.length > 0) {
                                                         candidates.sort((a, b) => b.area - a.area);
                                                         return candidates[0].text;
                                                     }
-                                                    
+
                                                     return null;
                                                 });
 
@@ -962,7 +994,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                         console.log(`  ⚠️ Hover error (continuing): ${e.message}`);
                                     }
                                 }
-                                
+
                                 if (result.appSubtitle !== 'NOT_FOUND') break; // Found subtitle, stop checking frames
                             }
                         } catch (e) {
@@ -976,20 +1008,20 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                         console.log(`  🔍 Checking main page for subtitle...`);
                         const subtitleElements = await page.evaluate(() => {
                             const elements = [];
-                            
+
                             // Try exact class first
                             let allElements = document.querySelectorAll('.cS4Vcb-vnv8ic');
-                            
+
                             // If not found, try partial match
                             if (allElements.length === 0) {
                                 allElements = document.querySelectorAll('[class*="cS4Vcb"][class*="vnv8ic"]');
                             }
-                            
+
                             // If still not found, try any element with vnv8ic
                             if (allElements.length === 0) {
                                 allElements = document.querySelectorAll('[class*="vnv8ic"]');
                             }
-                            
+
                             allElements.forEach(el => {
                                 const rect = el.getBoundingClientRect();
                                 if (rect.width > 0 && rect.height > 0) {
@@ -1009,10 +1041,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                     }
                                 }
                             });
-                            
+
                             // Sort by area (larger elements first)
                             elements.sort((a, b) => b.area - a.area);
-                            
+
                             return elements;
                         });
 
@@ -1026,21 +1058,21 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                                     window.scrollTo(x - window.innerWidth / 2, y - window.innerHeight / 2);
                                 }, subtitleEl.x, subtitleEl.y);
                                 await sleep(200); // Reduced from 300ms
-                                
+
                                 await client.send('Input.dispatchMouseEvent', {
                                     type: 'mouseMoved',
                                     x: subtitleEl.x,
                                     y: subtitleEl.y
                                 });
                                 await sleep(400 + Math.random() * 200); // Reduced: 400-600ms (was 800-1200ms)
-                                
+
                                 const hoveredText = await page.evaluate((x, y) => {
                                     const element = document.elementFromPoint(x, y);
                                     if (element) {
                                         // Check if element or its parent has the class
                                         let checkEl = element;
                                         for (let i = 0; i < 3 && checkEl; i++) {
-                                            if (checkEl.classList && (checkEl.classList.contains('cS4Vcb-vnv8ic') || 
+                                            if (checkEl.classList && (checkEl.classList.contains('cS4Vcb-vnv8ic') ||
                                                 checkEl.className.includes('vnv8ic'))) {
                                                 const text = (checkEl.innerText || checkEl.textContent || '').trim();
                                                 if (text && text.length >= 3 && text.length <= 200) {
@@ -1066,7 +1098,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, existingStoreLi
                             }
                         }
                     }
-                    
+
                     if (result.appSubtitle === 'NOT_FOUND') {
                         console.log(`  ⚠️ Subtitle not found - continuing with other extractions`);
                     }

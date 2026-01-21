@@ -66,10 +66,39 @@ const randomDelay = (min, max) => new Promise(r => setTimeout(r, min + Math.rand
 // GOOGLE SHEETS
 // ============================================
 async function getGoogleSheetsClient() {
-    if (!fs.existsSync(CREDENTIALS_PATH)) {
-        throw new Error(`Credentials file not found: ${CREDENTIALS_PATH}`);
+    let credentials;
+
+    // Priority 1: Environment Variable (most secure for CI)
+    if (process.env.GOOGLE_CREDENTIALS) {
+        try {
+            credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+        } catch (err) {
+            console.error('❌ Error parsing GOOGLE_CREDENTIALS environment variable.');
+            console.error('   Make sure the secret is a valid JSON string.');
+            throw err;
+        }
     }
-    const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
+    // Priority 2: Credentials File
+    else if (fs.existsSync(CREDENTIALS_PATH)) {
+        try {
+            const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+            if (content.trim().startsWith('***')) {
+                throw new Error('Credentials file contains masked secret (***). This usually happens when the secret is piped incorrectly in CI.');
+            }
+            credentials = JSON.parse(content);
+        } catch (err) {
+            console.error(`❌ Error parsing ${CREDENTIALS_PATH}`);
+            console.error(`   Error: ${err.message}`);
+            if (err.message.includes('JSON')) {
+                const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+                console.error(`   File starts with: "${content.substring(0, 20)}..."`);
+            }
+            throw err;
+        }
+    } else {
+        throw new Error(`Google credentials not found. Set GOOGLE_CREDENTIALS env var or create ${CREDENTIALS_PATH}`);
+    }
+
     const auth = new google.auth.GoogleAuth({
         credentials,
         scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -108,7 +137,7 @@ async function getUrlData(sheets) {
 
             // Process rows that need extraction (app name, app link, or app headline)
             const needsMetadata = !storeLink || storeLink === 'NOT_FOUND' || !appName || !appSubtitle;
-            
+
             toProcess.push({
                 url,
                 rowIndex: actualRowIndex,
@@ -134,24 +163,24 @@ async function getUrlData(sheets) {
 function removeCSSFromHTML(html) {
     // Remove <style> tags and their content
     html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-    
+
     // Remove style attributes from elements
     html = html.replace(/\s*style\s*=\s*["'][^"']*["']/gi, '');
-    
+
     // Remove CSS-related link tags
     html = html.replace(/<link[^>]*rel\s*=\s*["']stylesheet["'][^>]*>/gi, '');
-    
+
     return html;
 }
 
 function extractScripts(html) {
     const $ = cheerio.load(html);
     const scripts = [];
-    
+
     $('script').each((i, elem) => {
         const scriptContent = $(elem).html() || '';
         const scriptSrc = $(elem).attr('src') || '';
-        
+
         if (scriptContent.trim()) {
             scripts.push({
                 type: 'inline',
@@ -166,7 +195,7 @@ function extractScripts(html) {
             });
         }
     });
-    
+
     return scripts;
 }
 
@@ -177,27 +206,27 @@ function extractScripts(html) {
 async function writeToSheet(sheets, rowIndex, packageName, appName, appSubtitle) {
     const rowNum = rowIndex + 1; // Convert 0-based index to 1-based row number
     const data = [];
-    
+
     // Play Store URL template
     const PLAY_STORE_URL_TEMPLATE = 'https://play.google.com/store/apps/details?id=';
-    
+
     // Construct full Play Store URL (Column C) - Combine template + package name
     let storeLinkValue = 'NOT_FOUND';
     if (packageName && packageName !== 'SKIP' && packageName !== 'NOT_FOUND') {
         storeLinkValue = `${PLAY_STORE_URL_TEMPLATE}${packageName}`;
     }
     data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
-    
+
     // Write app name (Column D) - ALWAYS write
     const appNameValue = appName && appName !== 'SKIP' ? appName : 'NOT_FOUND';
     data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appNameValue]] });
-    
+
     // Write app headline/subtitle (Column F) - ALWAYS write
     const appSubtitleValue = appSubtitle || 'NOT_FOUND';
     data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
-    
+
     if (data.length === 0) return;
-    
+
     try {
         await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
@@ -213,17 +242,17 @@ async function writeToSheet(sheets, rowIndex, packageName, appName, appSubtitle)
 function saveHTMLToFile(html, url, rowNumber) {
     // Only save if HTML_OUTPUT_DIR is set and directory exists
     if (!HTML_OUTPUT_DIR || HTML_OUTPUT_DIR === '') return null;
-    
+
     // Create output directory if it doesn't exist
     if (!fs.existsSync(HTML_OUTPUT_DIR)) {
         fs.mkdirSync(HTML_OUTPUT_DIR, { recursive: true });
     }
-    
+
     // Clean URL for filename
     const urlSlug = url.replace(/https?:\/\//, '').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
     const filename = `row_${rowNumber}_${urlSlug}.html`;
     const filepath = path.join(HTML_OUTPUT_DIR, filename);
-    
+
     fs.writeFileSync(filepath, html, 'utf8');
     return filepath;
 }
@@ -234,59 +263,59 @@ function saveHTMLToFile(html, url, rowNumber) {
 async function setupAntiDetection(page, userAgent, viewport) {
     // Set user agent
     await page.setUserAgent(userAgent);
-    
+
     // Set viewport
     await page.setViewport(viewport);
-    
+
     // Random screen properties
     const screenWidth = viewport.width + Math.floor(Math.random() * 100) - 50;
     const screenHeight = viewport.height + Math.floor(Math.random() * 100) - 50;
-    
+
     // Enhanced fingerprint masking
     await page.evaluateOnNewDocument((screenW, screenH) => {
         // Remove webdriver flag
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        
+
         // Chrome runtime
         window.chrome = { runtime: {} };
-        
+
         // Plugins
         Object.defineProperty(navigator, 'plugins', {
             get: () => [1, 2, 3, 4, 5],
             configurable: true
         });
-        
+
         // Languages
         Object.defineProperty(navigator, 'languages', {
             get: () => ['en-US', 'en'],
             configurable: true
         });
-        
+
         // Platform
         Object.defineProperty(navigator, 'platform', {
             get: () => /Win/.test(navigator.userAgent) ? 'Win32' :
                 /Mac/.test(navigator.userAgent) ? 'MacIntel' : 'Linux x86_64',
             configurable: true
         });
-        
+
         // Hardware concurrency
         Object.defineProperty(navigator, 'hardwareConcurrency', {
             get: () => 4 + Math.floor(Math.random() * 4),
             configurable: true
         });
-        
+
         // Device memory
         Object.defineProperty(navigator, 'deviceMemory', {
             get: () => [4, 8, 16][Math.floor(Math.random() * 3)],
             configurable: true
         });
-        
+
         // Screen properties
         Object.defineProperty(screen, 'width', { get: () => screenW, configurable: true });
         Object.defineProperty(screen, 'height', { get: () => screenH, configurable: true });
         Object.defineProperty(screen, 'availWidth', { get: () => screenW, configurable: true });
         Object.defineProperty(screen, 'availHeight', { get: () => screenH - 40, configurable: true });
-        
+
         // Permissions
         const originalQuery = window.navigator.permissions.query;
         window.navigator.permissions.query = (parameters) => (
@@ -294,7 +323,7 @@ async function setupAntiDetection(page, userAgent, viewport) {
                 Promise.resolve({ state: Notification.permission }) :
                 originalQuery(parameters)
         );
-        
+
         // Canvas fingerprint protection
         const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
         HTMLCanvasElement.prototype.toDataURL = function () {
@@ -309,34 +338,34 @@ async function setupAntiDetection(page, userAgent, viewport) {
             return originalToDataURL.apply(this, arguments);
         };
     }, screenWidth, screenHeight);
-    
+
     // Block unnecessary resources (CSS, images, fonts) for speed
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
         const resourceType = request.resourceType();
-        
+
         // Block CSS, images, fonts, but keep scripts and HTML
         const blockedTypes = ['image', 'font', 'stylesheet'];
         const blockedPatterns = [
             'analytics', 'google-analytics', 'doubleclick', 'pagead',
             'facebook.com', 'bing.com', 'logs', 'collect', 'securepubads'
         ];
-        
+
         if (blockedTypes.includes(resourceType) || blockedPatterns.some(p => requestUrl.includes(p))) {
             request.abort();
         } else {
             request.continue();
         }
     });
-    
+
     // Enhanced headers
     const acceptLanguages = [
         'en-US,en;q=0.9',
         'en-US,en;q=0.9,zh-CN;q=0.8',
         'en-GB,en;q=0.9'
     ];
-    
+
     await page.setExtraHTTPHeaders({
         'accept-language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -357,17 +386,17 @@ async function setupAntiDetection(page, userAgent, viewport) {
 // ============================================
 async function extractFullHTML(url, browser, attempt = 1) {
     const page = await browser.newPage();
-    
+
     try {
         const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
         const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
-        
+
         await setupAntiDetection(page, userAgent, viewport);
-        
+
         console.log(`\n🌐 [Attempt ${attempt}] Loading: ${url.substring(0, 60)}...`);
         console.log(`   User-Agent: ${userAgent.substring(0, 50)}...`);
         console.log(`   Viewport: ${viewport.width}x${viewport.height}`);
-        
+
         // Human-like mouse movement before load
         try {
             const client = await page.target().createCDPSession();
@@ -377,13 +406,13 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 y: Math.random() * viewport.height
             });
         } catch (e) { /* Ignore */ }
-        
+
         // Navigate with networkidle2 for full page load
         const response = await page.goto(url, {
             waitUntil: 'networkidle2',
             timeout: MAX_WAIT_TIME
         });
-        
+
         // Check for blocks
         const content = await page.content();
         if ((response && response.status && response.status() === 429) ||
@@ -396,11 +425,11 @@ async function extractFullHTML(url, browser, attempt = 1) {
             await page.close();
             return { success: false, blocked: true, html: null };
         }
-        
+
         // Wait for dynamic content (SAFETY: Long wait)
         console.log(`   ⏳ Waiting ${WAIT_AFTER_LOAD / 1000}s for dynamic content...`);
         await sleep(WAIT_AFTER_LOAD);
-        
+
         // Wait for iframes to load
         try {
             await page.evaluate(async () => {
@@ -434,7 +463,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
         } catch (e) {
             await sleep(1000);
         }
-        
+
         // Human-like scrolling
         await page.evaluate(async () => {
             for (let i = 0; i < 3; i++) {
@@ -444,19 +473,19 @@ async function extractFullHTML(url, browser, attempt = 1) {
             window.scrollBy(0, -200);
             await new Promise(r => setTimeout(r, 300));
         });
-        
+
         // Get FULL HTML source
         const fullHTML = await page.content();
-        
+
         // Remove CSS (as requested)
         const htmlWithoutCSS = removeCSSFromHTML(fullHTML);
-        
+
         // Extract scripts
         const scripts = extractScripts(htmlWithoutCSS);
-        
+
         // Parse HTML and extract data (using cheerio) - EXACT SAME LOGIC AS unified_agent
         const $ = cheerio.load(htmlWithoutCSS);
-        
+
         // Clean name function - EXACT COPY from unified_agent
         const cleanAppName = (text) => {
             if (!text || typeof text !== 'string') return null;
@@ -474,7 +503,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
             if (/^[\d\s\W]+$/.test(clean)) return null;
             return clean;
         };
-        
+
         // Clean name function with more CSS filtering - EXACT COPY from unified_agent
         const cleanName = (name) => {
             if (!name) return 'NOT_FOUND';
@@ -495,12 +524,12 @@ async function extractFullHTML(url, browser, attempt = 1) {
             }
             return cleaned || 'NOT_FOUND';
         };
-        
+
         const blacklistName = 'ad details';
         let packageName = null; // Extract ONLY package name (e.g., com.example.app)
         let appName = null;
         let appSubtitle = null;
-        
+
         // Extract package name from meta tag - EXACT SAME LOGIC as unified_agent, but return ONLY package name
         try {
             const firstMetaTag = $('meta[data-asoch-meta]').first();
@@ -516,7 +545,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                             packageName = pkgName;
                         }
                     }
-                    
+
                     // Pattern 2: Parse JSON and extract from ad0 entry
                     if (!packageName) {
                         try {
@@ -544,7 +573,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                                                         }
                                                     } catch (e) { }
                                                 }
-                                                
+
                                                 // Extract package directly from URL string
                                                 if (!packageName) {
                                                     const pkgMatch = urlString.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
@@ -566,15 +595,15 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 }
             }
         } catch (e) { /* Ignore */ }
-        
+
         // Extract app name - EXACT SAME SELECTORS AND LOGIC as unified_agent
         // Check #portrait-landscape-phone first, then body
         const rootSelectors = ['#portrait-landscape-phone', 'body'];
-        
+
         for (const rootSelector of rootSelectors) {
             const root = $(rootSelector).first();
             if (root.length === 0) continue;
-            
+
             const appNameSelectors = [
                 'a[data-asoch-targets*="ochAppName"]',
                 'a[data-asoch-targets*="appname" i]',
@@ -582,7 +611,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 'a[class*="short-app-name"]',
                 '.short-app-name a'
             ];
-            
+
             for (const selector of appNameSelectors) {
                 const elements = root.find(selector);
                 for (let i = 0; i < elements.length; i++) {
@@ -590,7 +619,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                     const rawName = el.text() || '';
                     const cleanedName = cleanAppName(rawName);
                     if (!cleanedName || cleanedName.toLowerCase() === blacklistName) continue;
-                    
+
                     if (cleanedName && !appName) {
                         appName = cleanedName;
                         break;
@@ -598,7 +627,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 }
                 if (appName) break;
             }
-            
+
             // Fallback for app name
             if (!appName) {
                 const textSels = ['[role="heading"]', 'div[class*="app-name"]', '.app-title'];
@@ -616,10 +645,10 @@ async function extractFullHTML(url, browser, attempt = 1) {
                     if (appName) break;
                 }
             }
-            
+
             if (appName) break; // Found app name, stop searching
         }
-        
+
         // Final fallback: extract from page title
         if (!appName || appName === 'NOT_FOUND' || appName === 'Ad Details') {
             try {
@@ -632,47 +661,47 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 }
             } catch (e) { /* Ignore */ }
         }
-        
+
         // Extract subtitle - EXACT SAME LOGIC as unified_agent (cS4Vcb-vnv8ic class)
         // Only extract if we have app name (text ad detection)
         const isTextAdForSubtitle = appName && appName !== 'NOT_FOUND' && appName !== 'Ad Details';
-        
+
         if (isTextAdForSubtitle) {
             // Try extracting from iframes HTML content (if available in main HTML)
             // Then try main page
             for (const rootSelector of rootSelectors) {
                 const root = $(rootSelector).first();
                 if (root.length === 0) continue;
-                
+
                 // Try exact class first
                 let subtitleEls = root.find('.cS4Vcb-vnv8ic');
-                
+
                 // If not found, try partial match
                 if (subtitleEls.length === 0) {
                     subtitleEls = root.find('[class*="cS4Vcb"][class*="vnv8ic"]');
                 }
-                
+
                 // If still not found, try any element with vnv8ic
                 if (subtitleEls.length === 0) {
                     subtitleEls = root.find('[class*="vnv8ic"]');
                 }
-                
+
                 const candidates = [];
-                
+
                 for (let i = 0; i < subtitleEls.length; i++) {
                     const el = $(subtitleEls[i]);
                     const text = el.text() || '';
                     const trimmedText = text.trim();
-                    
+
                     if (trimmedText && trimmedText.length >= 3 && trimmedText.length <= 200) {
                         // Less strict validation - just avoid CSS-like content
-                        if (!trimmedText.includes('{') && !trimmedText.includes('px') && 
+                        if (!trimmedText.includes('{') && !trimmedText.includes('px') &&
                             !trimmedText.includes('height') && !trimmedText.includes('width')) {
                             candidates.push({ text: trimmedText, index: i });
                         }
                     }
                 }
-                
+
                 // Return first valid subtitle (largest/earliest in DOM)
                 if (candidates.length > 0) {
                     appSubtitle = candidates[0].text;
@@ -680,14 +709,14 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 }
             }
         }
-        
+
         // Apply cleanName to appName for final cleaning (same as unified_agent)
         if (appName && appName !== 'NOT_FOUND') {
             appName = cleanName(appName);
         }
-        
+
         await page.close();
-        
+
         return {
             success: true,
             blocked: false,
@@ -700,13 +729,13 @@ async function extractFullHTML(url, browser, attempt = 1) {
             appName: appName || 'NOT_FOUND',
             appSubtitle: appSubtitle || 'NOT_FOUND'
         };
-        
+
     } catch (err) {
         console.error(`  ❌ Error: ${err.message}`);
         try {
             await page.close();
         } catch (e) { /* Ignore */ }
-        
+
         return {
             success: false,
             blocked: false,
@@ -730,24 +759,24 @@ async function extractFullHTML(url, browser, attempt = 1) {
         console.log(`📁 HTML Output: Disabled (only writing to sheet)`);
     }
     console.log(`🔢 Max URLs to test: ${MAX_URLS_TO_TEST}\n`);
-    
+
     // Create output directory only if HTML_OUTPUT_DIR is set
     if (HTML_OUTPUT_DIR && !fs.existsSync(HTML_OUTPUT_DIR)) {
         fs.mkdirSync(HTML_OUTPUT_DIR, { recursive: true });
         console.log(`✅ Created output directory: ${HTML_OUTPUT_DIR}\n`);
     }
-    
+
     try {
         const sheets = await getGoogleSheetsClient();
         const toProcess = await getUrlData(sheets);
-        
+
         if (toProcess.length === 0) {
             console.log('✨ No URLs found to process.');
             process.exit(0);
         }
-        
+
         console.log(`🚀 Processing ${toProcess.length} URLs ONE BY ONE (safe mode)\n`);
-        
+
         // Launch browser with maximum stealth
         const proxy = pickProxy();
         const launchArgs = [
@@ -764,20 +793,20 @@ async function extractFullHTML(url, browser, attempt = 1) {
             '--disable-web-security',
             '--disable-features=IsolateOrigins,site-per-process'
         ];
-        
+
         if (proxy) {
             launchArgs.push(`--proxy-server=${proxy}`);
             console.log(`🌐 Using proxy: ${proxy}\n`);
         } else {
             console.log(`🌐 Running direct (no proxy)\n`);
         }
-        
+
         const browser = await puppeteer.launch({
             headless: 'new',
             args: launchArgs,
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
         });
-        
+
         // Process URLs ONE BY ONE (safest approach)
         for (let i = 0; i < toProcess.length; i++) {
             const item = toProcess[i];
@@ -786,48 +815,48 @@ async function extractFullHTML(url, browser, attempt = 1) {
             console.log(`   Row: ${item.rowNumber}`);
             console.log(`   URL: ${item.url}`);
             console.log(`${'='.repeat(80)}`);
-            
+
             let success = false;
             let result = null;
-            
+
             // Retry logic
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 result = await extractFullHTML(item.url, browser, attempt);
-                
+
                 if (result.success && !result.blocked) {
                     success = true;
                     break;
                 }
-                
+
                 if (result.blocked) {
                     console.error(`  🛑 BLOCKED - Stopping to avoid further blocks`);
                     await browser.close();
                     process.exit(1);
                 }
-                
+
                 if (attempt < MAX_RETRIES) {
                     console.log(`  🔄 Retrying in ${RETRY_DELAY / 1000}s...`);
                     await sleep(RETRY_DELAY);
                 }
             }
-            
+
             if (success && result.html) {
                 // Extract data from HTML (already done in extractFullHTML)
                 const packageName = result.packageName || 'NOT_FOUND';
                 const appName = result.appName || 'NOT_FOUND';
                 const appSubtitle = result.appSubtitle || 'NOT_FOUND';
-                
+
                 // Write ONLY to Columns C, D, F (required data only)
                 // Column C: Full Play Store URL (https://play.google.com/store/apps/details?id=com.example.app)
                 // Column D: App Name
                 // Column F: App Subtitle
                 await writeToSheet(sheets, item.rowIndex, packageName, appName, appSubtitle);
-                
+
                 // Construct full URL for display
-                const fullStoreUrl = packageName && packageName !== 'NOT_FOUND' 
-                    ? `https://play.google.com/store/apps/details?id=${packageName}` 
+                const fullStoreUrl = packageName && packageName !== 'NOT_FOUND'
+                    ? `https://play.google.com/store/apps/details?id=${packageName}`
                     : 'NOT_FOUND';
-                
+
                 console.log(`\n✅ Success!`);
                 console.log(`   📊 Scripts found: ${result.scriptsCount}`);
                 console.log(`   📏 HTML size: ${(result.html.length / 1024).toFixed(2)} KB`);
@@ -835,7 +864,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 console.log(`   📦 Package Name: ${packageName}`);
                 console.log(`   📱 App Name: ${appName}`);
                 console.log(`   📝 Subtitle: ${appSubtitle.substring(0, 50)}...`);
-                
+
                 // Optional: Save HTML to file for inspection (only if HTML_OUTPUT_DIR is set)
                 if (HTML_OUTPUT_DIR && HTML_OUTPUT_DIR !== '') {
                     const filepath = saveHTMLToFile(result.html, item.url, item.rowNumber);
@@ -853,16 +882,16 @@ async function extractFullHTML(url, browser, attempt = 1) {
                     await writeToSheet(sheets, item.rowIndex, 'NOT_FOUND', 'NOT_FOUND', 'NOT_FOUND');
                 }
             }
-            
+
             // SAFETY: Wait between URLs (prevent rate limiting)
             if (i < toProcess.length - 1) {
                 console.log(`\n⏳ Waiting ${PAGE_LOAD_DELAY / 1000}s before next URL...`);
                 await sleep(PAGE_LOAD_DELAY);
             }
         }
-        
+
         await browser.close();
-        
+
         console.log(`\n${'='.repeat(80)}`);
         console.log('🏁 Test Complete!');
         console.log(`✅ Data written to sheet: Columns C (Play Store URL), D (App Name), F (Subtitle)`);
@@ -870,7 +899,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
             console.log(`📁 HTML files saved in: ${HTML_OUTPUT_DIR} (for inspection)`);
         }
         console.log(`${'='.repeat(80)}\n`);
-        
+
     } catch (error) {
         console.error(`\n❌ Fatal error: ${error.message}`);
         console.error(error.stack);

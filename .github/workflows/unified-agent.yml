@@ -37,11 +37,9 @@ jobs:
         run: npm ci
       
       - name: Create credentials file
-        run: |
-          cat > credentials.json << EOF
-          ${{ secrets.GOOGLE_CREDENTIALS }}
-          EOF
-        shell: bash
+        run: echo "$GOOGLE_CREDENTIALS" > credentials.json
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       
       - name: Run Unified Agent
         env:
