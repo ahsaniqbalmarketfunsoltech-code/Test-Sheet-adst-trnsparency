@@ -7,7 +7,7 @@ on:
     - cron: '0 2 * * *'
 
 env:
-  NODE_VERSION: '18.x'
+  NODE_VERSION: '20.x'
   SHEET_NAME: 'Test data'
   MAX_URLS_TO_TEST: 5
   PAGE_LOAD_DELAY: 5000
@@ -97,7 +97,7 @@ jobs:
           RETRY_DELAY: ${{ env.RETRY_DELAY }}
           # Optional: Add proxy support via secrets
           PROXIES: ${{ secrets.PROXIES }}
-          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable || $(which chromium) || $(which chromium-browser)
+          # Puppeteer will auto-detect Chromium from node_modules
       
       - name: Upload HTML output files
         if: always()
