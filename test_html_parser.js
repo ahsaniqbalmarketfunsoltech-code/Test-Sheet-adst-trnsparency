@@ -149,10 +149,19 @@ function cleanName(name) {
     if (cleaned.includes('|')) cleaned = cleaned.split('|')[0];
     cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
+    // Safety check: ignore code-like strings
+    if (cleaned.startsWith(',') || cleaned.startsWith('{') || cleaned.includes('{') || cleaned.includes('}') || cleaned.includes(';')) {
+        return 'NOT_FOUND';
+    }
+
     const black = cleaned.toLowerCase();
-    if (black === 'ad details' || black === 'google ads' || black === 'sponsored') return 'NOT_FOUND';
+    const blacklist = ['ad details', 'google ads', 'sponsored', 'advertisement', 'transparency center', 'learn more'];
+    if (blacklist.some(b => black === b || black.includes(b))) return 'NOT_FOUND';
+
     if (cleaned.length < 2 || cleaned.length > 80) return 'NOT_FOUND';
-    if (/:\s*\d/.test(cleaned) || cleaned.includes('height') || cleaned.includes('width')) return 'NOT_FOUND';
+    if (/:\s*\d/.test(cleaned) || cleaned.includes('height') || cleaned.includes('width') || cleaned.includes('font-')) {
+        return 'NOT_FOUND';
+    }
 
     return cleaned || 'NOT_FOUND';
 }
@@ -225,7 +234,15 @@ async function extractFullHTML(url, browser, attempt = 1) {
                 const res = await frame.evaluate((bl) => {
                     const d = { pkg: null, name: null, sub: null };
 
-                    // 1. Meta Tags
+                    const isValidText = (t) => {
+                        if (!t) return false;
+                        const low = t.toLowerCase();
+                        if (t.includes('{') || t.includes('}') || t.includes(';') || t.startsWith(',')) return false;
+                        if (low.includes('ad details') || low.includes('google ads') || low.includes('sponsored') || low.includes('transparency center')) return false;
+                        return t.length > 1 && t.length < 150;
+                    };
+
+                    // 1. Meta Tags (Package ID)
                     const metas = document.querySelectorAll('meta[data-asoch-meta]');
                     for (const m of metas) {
                         const c = m.getAttribute('data-asoch-meta');
@@ -235,19 +252,41 @@ async function extractFullHTML(url, browser, attempt = 1) {
                         }
                     }
 
-                    // 2. Names
+                    // 2. App Name (Big heading - Blue Text)
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
                     if (root) {
-                        const sels = ['a[data-asoch-targets*="AppName"]', 'a[class*="short-app-name"]', '[role="heading"]', '.app-title', 'div[class*="app-name"]'];
-                        for (const s of sels) {
+                        const nameSels = [
+                            '[role="heading"]',
+                            'div[class*="headline"]',
+                            '.headline',
+                            'a[data-asoch-targets*="AppName"]',
+                            'a[class*="short-app-name"]',
+                            '.app-name'
+                        ];
+                        for (const s of nameSels) {
                             const el = root.querySelector(s);
                             if (el) {
                                 let t = el.innerText.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
-                                if (t && t.length > 1 && !t.toLowerCase().includes(bl)) { d.name = t; break; }
+                                if (isValidText(t)) { d.name = t; break; }
                             }
                         }
-                        const sub = root.querySelector('.cS4Vcb-vnv8ic') || root.querySelector('[class*="vnv8ic"]');
-                        if (sub) d.sub = sub.innerText.trim();
+
+                        // 3. App Subtitle (Smaller description below heading)
+                        const subSels = [
+                            '.cS4Vcb-vnv8ic',
+                            '[class*="vnv8ic"]',
+                            'div[class*="description"]',
+                            'span[class*="description"]',
+                            '.subtitle'
+                        ];
+                        for (const s of subSels) {
+                            const el = root.querySelector(s);
+                            if (el) {
+                                let t = el.innerText.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+                                // Ensure subtitle is not identical to the name
+                                if (isValidText(t) && t !== d.name) { d.sub = t; break; }
+                            }
+                        }
                     }
                     return d;
                 }, blacklist);
