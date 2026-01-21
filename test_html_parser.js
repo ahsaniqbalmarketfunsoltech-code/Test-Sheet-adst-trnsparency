@@ -28,8 +28,9 @@ const HTML_OUTPUT_DIR = process.env.HTML_OUTPUT_DIR || '';
 const MAX_URLS_TO_TEST = parseInt(process.env.MAX_URLS_TO_TEST) || 99999; // Process all
 
 // SAFETY SETTINGS
-const PAGE_LOAD_DELAY = parseInt(process.env.PAGE_LOAD_DELAY) || 5000;
-const WAIT_AFTER_LOAD = parseInt(process.env.WAIT_AFTER_LOAD) || 8000;
+// SAFETY SETTINGS
+const PAGE_LOAD_DELAY = parseInt(process.env.PAGE_LOAD_DELAY) || 1000;
+const WAIT_AFTER_LOAD = parseInt(process.env.WAIT_AFTER_LOAD) || 2500;
 const MAX_WAIT_TIME = 90000;
 const RETRY_DELAY = parseInt(process.env.RETRY_DELAY) || 10000;
 const MAX_RETRIES = 2;
@@ -239,12 +240,29 @@ async function extractFullHTML(url, browser, attempt = 1) {
                         const low = t.toLowerCase();
                         if (t.includes('{') || t.includes('}') || t.includes(';') || t.startsWith(',')) return false;
                         if (low.includes('ad details') || low.includes('google ads') || low.includes('sponsored') || low.includes('transparency center')) return false;
-                        // Filter generic button texts
-                        if (['install', 'open', 'download', 'play', 'get', 'more', 'visit site', 'learn more'].includes(low.trim())) return false;
+
+                        // Universal Button Filter (English, Spanish, French, German, Arabic, Russian, Asian languages)
+                        const buttons = [
+                            'install', 'open', 'download', 'play', 'get', 'more', 'visit site', 'learn more', // En
+                            'instalar', 'abrir', 'descargar', 'jugar', 'obten', 'visitar', // Es/Pt
+                            'installer', 'ouvrir', 'télécharger', 'jouer', // Fr
+                            'installieren', 'öffnen', 'herunterladen', 'spielen', // De
+                            'установить', 'открыть', 'скачать', 'играть', // Ru
+                            'تثبيت', 'فتح', 'تحميل', 'لعب', 'زيارة', // Ar
+                            'インストール', '開く', 'ダウンロード', 'プレイ', // Ja
+                            '설치', '열기', '다운로드', '플레이', // Ko
+                            '安装', '打开', '下载', '玩' // Zh
+                        ];
+                        if (buttons.some(b => low === b || low.includes(b) && low.length < 10)) return false;
+
+                        // Filter Consent/Login screens
+                        if (low.includes('before you continue') || low.includes('sign in') || low.includes('agree') || low.includes('cookie')) return false;
                         return t.length > 1 && t.length < 150;
                     };
 
-                    // DOM-based extraction for Name and Headline (Priority)
+                    // =========================================================
+                    // PURE VISUAL SCAN (No Hidden "Inspect" Code)
+                    // =========================================================
                     const adRoot = document.querySelector('#portrait-landscape-phone') ||
                         document.querySelector('.ad-creative') ||
                         document.body;
@@ -259,7 +277,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                             '#creative-brand-name',
                             'div[role="heading"]',
                             '[aria-label="App Name"]',
-                            'h3', // Google Search often uses h3
+                            'h3',
                             '.headline',
                             '#creative-headline'
                         ];
@@ -284,7 +302,7 @@ async function extractFullHTML(url, browser, attempt = 1) {
                             'span[class*="description"]',
                             '.subtitle',
                             '#creative-description',
-                            '.cS4Vcb-vnv8ic', // Google Ad description class
+                            '.cS4Vcb-vnv8ic',
                             '[class*="vnv8ic"]'
                         ];
 
@@ -298,16 +316,6 @@ async function extractFullHTML(url, browser, attempt = 1) {
                                 }
                             }
                             if (d.sub) break;
-                        }
-                    }
-
-                    // 3. Package ID from Meta only (Background check)
-                    const metas = document.querySelectorAll('meta[data-asoch-meta]');
-                    for (const m of metas) {
-                        const c = m.getAttribute('data-asoch-meta');
-                        if (c) {
-                            const match = c.match(/id%3D([a-zA-Z0-9._]+)|[?&]id=([a-zA-Z0-9._]+)/);
-                            if (match) { d.pkg = match[1] || match[2]; break; }
                         }
                     }
 
@@ -359,6 +367,21 @@ async function extractFullHTML(url, browser, attempt = 1) {
             headless: 'new',
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
         });
+
+        // -----------------------------------------------------
+        // WARM UP PHASE: Handles "Consent" & Initial Cookies
+        // -----------------------------------------------------
+        console.log('🔥 Warming up browser to clear initial checks...');
+        try {
+            const page = await browser.newPage();
+            // Visit the base domain to set cookies/storage usually
+            await page.goto('https://adstransparency.google.com/', { waitUntil: 'networkidle2', timeout: 30000 });
+            await sleep(2000);
+            await page.close();
+            console.log('✅ Warmup connection complete. Ready for data.');
+        } catch (e) {
+            console.log('⚠️ Warmup warning (proceeding anyway):', e.message);
+        }
 
         for (let i = 0; i < toProcess.length; i++) {
             const item = toProcess[i];
