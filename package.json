@@ -7,6 +7,7 @@
     "start": "node agent.js",
     "unified": "node \"unified_agent copy.js\"",
     "unified-agent": "node \"unified_agent copy.js\"",
+    "test-html": "node test_html_parser.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -14,6 +15,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "cheerio": "^1.0.0",
     "googleapis": "^169.0.0",
     "p-limit": "^7.2.0",
     "puppeteer": "^24.34.0",
