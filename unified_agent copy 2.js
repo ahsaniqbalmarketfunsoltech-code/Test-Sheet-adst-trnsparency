@@ -730,38 +730,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         };
 
                         // =====================================================
-                        // EXTRACTION - Find app name using KDwhZb class (primary)
-                        // Then verify with store link selectors
+                        // EXTRACTION - Find FIRST element with BOTH name + store link
+                        // Uses PRECISE selectors from app_data_agent.js
                         // =====================================================
-                        
-                        // PRIMARY: Use the KDwhZb div class to find app name (contains span with name)
-                        const appNameDivSelectors = [
-                            'div.KDwhZb-Gxk8ed-r4nke',
-                            'div[class*="KDwhZb-Gxk8ed-r4nke"]',
-                            'div[class*="KDwhZb"][class*="Gxk8ed"]',
-                            'div.cS4Vcb-kb9wTc',
-                            'div[class*="cS4Vcb-kb9wTc"]',
-                            'div[class*="cS4Vcb-pGL6qe-c0XB9d"]'
-                        ];
-
-                        // First try to get app name from the KDwhZb div (span inside)
-                        for (const selector of appNameDivSelectors) {
-                            const elements = root.querySelectorAll(selector);
-                            for (const el of elements) {
-                                // Get text from span inside or the div itself
-                                const span = el.querySelector('span');
-                                const rawName = span ? (span.innerText || span.textContent || '') : (el.innerText || el.textContent || '');
-                                const appName = cleanAppName(rawName);
-                                if (appName && appName.toLowerCase() !== blacklist && appName.length > 2) {
-                                    data.appName = appName;
-                                    break;
-                                }
-                            }
-                            if (data.appName) break;
-                        }
-
-                        // SECONDARY: Link-based selectors (for store link + fallback app name)
-                        const appLinkSelectors = [
+                        const appNameSelectors = [
                             'a[data-asoch-targets*="ochAppName"]',
                             'a[data-asoch-targets*="appname" i]',
                             'a[data-asoch-targets*="rrappname" i]',
@@ -769,25 +741,18 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             '.short-app-name a'
                         ];
 
-                        for (const selector of appLinkSelectors) {
+                        for (const selector of appNameSelectors) {
                             const elements = root.querySelectorAll(selector);
                             for (const el of elements) {
+                                const rawName = el.innerText || el.textContent || '';
+                                const appName = cleanAppName(rawName);
+                                if (!appName || appName.toLowerCase() === blacklist) continue;
+
                                 const storeLink = extractStoreLink(el.href);
-                                
-                                // If we don't have app name yet, try to get from link text
-                                if (!data.appName) {
-                                    const rawName = el.innerText || el.textContent || '';
-                                    const appName = cleanAppName(rawName);
-                                    if (appName && appName.toLowerCase() !== blacklist) {
-                                        data.appName = appName;
-                                    }
-                                }
-                                
-                                // If we have both name and link, return immediately
-                                if (data.appName && storeLink) {
-                                    return { appName: data.appName, storeLink, appSubtitle: data.appSubtitle, isVideo: true, isHidden: false };
-                                } else if (storeLink && !data.storeLink) {
-                                    data.storeLink = storeLink;
+                                if (appName && storeLink) {
+                                    return { appName, storeLink, isVideo: true, isHidden: false };
+                                } else if (appName && !data.appName) {
+                                    data.appName = appName;
                                 }
                             }
                         }
@@ -797,9 +762,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             const installSels = [
                                 'a[data-asoch-targets*="ochButton"]',
                                 'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]',
-                                'a[href*="play.google.com"]',
-                                'a[href*="apps.apple.com"]'
+                                'a[aria-label*="Install" i]'
                             ];
                             for (const sel of installSels) {
                                 const el = root.querySelector(sel);
@@ -814,14 +777,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
-                        // Fallback for app name only (if KDwhZb didn't find it)
+                        // Fallback for app name only
                         if (!data.appName) {
-                            const textSels = [
-                                'div[class*="KDwhZb"] span',
-                                '[role="heading"]', 
-                                'div[class*="app-name"]', 
-                                '.app-title'
-                            ];
+                            const textSels = ['[role="heading"]', 'div[class*="app-name"]', '.app-title'];
                             for (const sel of textSels) {
                                 const elements = root.querySelectorAll(sel);
                                 for (const el of elements) {
