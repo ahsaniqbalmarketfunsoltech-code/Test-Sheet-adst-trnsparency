@@ -239,11 +239,69 @@ async function extractFullHTML(url, browser, attempt = 1) {
                         const low = t.toLowerCase();
                         if (t.includes('{') || t.includes('}') || t.includes(';') || t.startsWith(',')) return false;
                         if (low.includes('ad details') || low.includes('google ads') || low.includes('sponsored') || low.includes('transparency center')) return false;
+                        // Filter generic button texts
+                        if (['install', 'open', 'download', 'play', 'get', 'more', 'visit site', 'learn more'].includes(low.trim())) return false;
                         return t.length > 1 && t.length < 150;
                     };
 
-                    // 1. Package ID (Strategy A: META)
-                    // 1. Meta Tags (Package ID)
+                    // DOM-based extraction for Name and Headline (Priority)
+                    const adRoot = document.querySelector('#portrait-landscape-phone') ||
+                        document.querySelector('.ad-creative') ||
+                        document.body;
+
+                    if (adRoot) {
+                        // 1. App Name Selectors (Focus on Title/Heading)
+                        const nameSels = [
+                            'a[data-asoch-targets*="AppName"]',
+                            '[data-asoch-targets*="AppName"]',
+                            '.app-name',
+                            '[class*="app-name"]',
+                            '#creative-brand-name',
+                            'div[role="heading"]',
+                            '[aria-label="App Name"]',
+                            'h3', // Google Search often uses h3
+                            '.headline',
+                            '#creative-headline'
+                        ];
+
+                        for (const s of nameSels) {
+                            const els = adRoot.querySelectorAll(s);
+                            for (const el of els) {
+                                let t = el.innerText.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+                                if (isValidText(t)) {
+                                    if (!d.name) { d.name = t; break; }
+                                }
+                            }
+                            if (d.name) break;
+                        }
+
+                        // 2. App Headline/Subtitle Selectors
+                        const subSels = [
+                            '[data-asoch-targets*="Headline"]',
+                            '[data-asoch-targets*="Description"]',
+                            'div[class*="description"]',
+                            '.description',
+                            'span[class*="description"]',
+                            '.subtitle',
+                            '#creative-description',
+                            '.cS4Vcb-vnv8ic', // Google Ad description class
+                            '[class*="vnv8ic"]'
+                        ];
+
+                        for (const s of subSels) {
+                            const els = adRoot.querySelectorAll(s);
+                            for (const el of els) {
+                                let t = el.innerText.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+                                // Ensure subtitle is not identical to the name
+                                if (isValidText(t) && t !== d.name) {
+                                    d.sub = t; break;
+                                }
+                            }
+                            if (d.sub) break;
+                        }
+                    }
+
+                    // 3. Package ID from Meta only (Background check)
                     const metas = document.querySelectorAll('meta[data-asoch-meta]');
                     for (const m of metas) {
                         const c = m.getAttribute('data-asoch-meta');
@@ -253,60 +311,6 @@ async function extractFullHTML(url, browser, attempt = 1) {
                         }
                     }
 
-                    // 1b. Package ID (Strategy B: Direct Link Fallback)
-                    if (!d.pkg) {
-                        const playLinks = document.querySelectorAll('a[href*="play.google.com/store/apps/details"]');
-                        for (const link of playLinks) {
-                            const href = link.getAttribute('href');
-                            if (href) {
-                                const match = href.match(/id=([a-zA-Z0-9._]+)/);
-                                if (match) { d.pkg = match[1]; break; }
-                            }
-                        }
-                    }
-
-                    // 2. Focused Root
-                    const adRoot = document.querySelector('#portrait-landscape-phone') ||
-                        document.querySelector('.ad-creative') ||
-                        document.body;
-
-                    if (adRoot) {
-                        // Priority Heading
-                        const nameSels = [
-                            'a[data-asoch-targets*="AppName"]',
-                            '#creative-headline',
-                            '.headline',
-                            '[role="heading"]',
-                            'div[class*="headline"]',
-                            'a[class*="short-app-name"]',
-                            '.app-name'
-                        ];
-
-                        for (const s of nameSels) {
-                            const el = adRoot.querySelector(s);
-                            if (el) {
-                                let t = el.innerText.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
-                                if (isValidText(t)) { d.name = t; break; }
-                            }
-                        }
-
-                        // 3. App Subtitle (Smaller description below heading)
-                        const subSels = [
-                            '.cS4Vcb-vnv8ic',
-                            '[class*="vnv8ic"]',
-                            'div[class*="description"]',
-                            'span[class*="description"]',
-                            '.subtitle'
-                        ];
-                        for (const s of subSels) {
-                            const el = adRoot.querySelector(s);
-                            if (el) {
-                                let t = el.innerText.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
-                                // Ensure subtitle is not identical to the name
-                                if (isValidText(t) && t !== d.name) { d.sub = t; break; }
-                            }
-                        }
-                    }
                     return d;
                 }, blacklist);
 
