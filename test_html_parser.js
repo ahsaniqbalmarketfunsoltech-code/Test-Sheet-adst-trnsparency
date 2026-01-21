@@ -260,6 +260,19 @@ async function extractFullHTML(url, browser, attempt = 1) {
                         return t.length > 1 && t.length < 150;
                     };
 
+                    const extractPackage = (href) => {
+                        try {
+                            const url = new URL(href, window.location.href);
+                            const id = url.searchParams.get('id');
+                            if (id) return id.trim();
+                            if (url.pathname.includes('details')) {
+                                const parts = url.pathname.split('id=');
+                                if (parts[1]) return parts[1].split('&')[0].trim();
+                            }
+                        } catch (_) { }
+                        return null;
+                    };
+
                     // =========================================================
                     // PURE VISUAL SCAN (No Hidden "Inspect" Code)
                     // =========================================================
@@ -277,9 +290,14 @@ async function extractFullHTML(url, browser, attempt = 1) {
                             '#creative-brand-name',
                             'div[role="heading"]',
                             '[aria-label="App Name"]',
+                            'h1',
+                            'h2',
                             'h3',
                             '.headline',
-                            '#creative-headline'
+                            '#creative-headline',
+                            '[class*="title"]',
+                            '[class*="brand"]',
+                            '[class*="appTitle"]'
                         ];
 
                         for (const s of nameSels) {
@@ -316,6 +334,71 @@ async function extractFullHTML(url, browser, attempt = 1) {
                                 }
                             }
                             if (d.sub) break;
+                        }
+
+                        // 3. Package / Play link selectors
+                        if (!d.pkg) {
+                            const pkgSels = [
+                                'a[href*="play.google.com/store/apps/details"]',
+                                'a[data-destination*="play.google.com/store/apps/details"]',
+                                'a[href*="play.app.goo.gl"]',
+                                'a[href*="apps/details?id="]'
+                            ];
+                            for (const s of pkgSels) {
+                                const links = adRoot.querySelectorAll(s);
+                                for (const link of links) {
+                                    const href = link.getAttribute('href') || '';
+                                    const pkg = extractPackage(href);
+                                    if (pkg) { d.pkg = pkg; break; }
+                                }
+                                if (d.pkg) break;
+                            }
+                        }
+                    }
+
+                    // ---------------------------------------------------------
+                    // FALLBACK: broader text scan to catch localized app names
+                    // ---------------------------------------------------------
+                    if (!d.name && adRoot) {
+                        const candidates = [];
+                        const addCandidate = (text, priority = 0) => {
+                            const t = (text || '').trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+                            if (!isValidText(t)) return;
+                            if (t === d.sub) return;
+                            candidates.push({ t, priority, len: t.length });
+                        };
+
+                        const fallbackSels = [
+                            'h1', 'h2', 'h3',
+                            '[role="heading"]',
+                            '[aria-label*="App"]', '[aria-label*="app"]',
+                            '[class*="headline"]', '[class*="title"]', '[class*="brand"]', '[class*="name"]'
+                        ];
+
+                        for (const s of fallbackSels) {
+                            const els = adRoot.querySelectorAll(s);
+                            for (const el of els) {
+                                addCandidate(el.innerText, 1);
+                                if (!d.name) {
+                                    const lines = (el.innerText || '').split(/\n|\r/).map(x => x.trim()).filter(Boolean);
+                                    for (const line of lines) addCandidate(line, 2);
+                                }
+                            }
+                        }
+
+                        // Text sweep: grab distinct lines; prefer first non-button, mid-length text
+                        const seen = new Set();
+                        const sweep = (adRoot.innerText || '').split(/\n|\r/).map(x => x.trim()).filter(Boolean);
+                        for (const line of sweep) {
+                            const norm = line.toLowerCase();
+                            if (seen.has(norm)) continue;
+                            seen.add(norm);
+                            addCandidate(line, 3);
+                        }
+
+                        if (candidates.length) {
+                            candidates.sort((a, b) => a.priority - b.priority || b.len - a.len);
+                            d.name = candidates[0].t;
                         }
                     }
 
