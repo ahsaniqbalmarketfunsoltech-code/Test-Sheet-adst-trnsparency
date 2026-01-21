@@ -1,7 +1,7 @@
 /**
- * UNIFIED GOOGLE ADS TRANSPARENCY AGENT (BOTTOM TO TOP)
+ * APP NAME EXTRACTION AGENT (BOTTOM TO TOP)
  * =====================================
- * Combines app_data_agent.js + agent.js in ONE VISIT per URL
+ * Extracts App Name from ALL Google Ads Transparency URLs
  * Processes rows from BOTTOM to TOP in batches
  * 
  * Sheet Structure:
@@ -9,7 +9,6 @@
  *   Column B: Ads URL
  *   Column C: App Link
  *   Column D: App Name
- *   Column E: Video IDa
  *   Column M: Timestamp
  */
 
@@ -269,28 +268,24 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
     const BASE_RETRY_DELAY = 5000; // 5 seconds base delay
 
     const data = [];
-    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
+    updates.forEach(({ rowIndex, advertiserName, storeLink, appName }) => {
         const rowNum = rowIndex + 1;
 
         // WRITE EVERYTHING - whatever data we get, write it to the sheet
         // This ensures every processed row gets marked with something
 
         // Write advertiser name (if we have any value)
-        if (advertiserName) {
+        if (advertiserName && advertiserName !== 'NOT_FOUND') {
             data.push({ range: `${ESCAPED_SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
         }
 
-        // Write store link (always write something - even SKIP, BLOCKED, NOT_FOUND, ERROR)
+        // Write store link (always write something - even BLOCKED, NOT_FOUND, ERROR)
         const storeLinkValue = storeLink || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
 
         // Write app name (always write something)
         const appNameValue = appName || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!D${rowNum}`, values: [[appNameValue]] });
-
-        // Write video ID (always write something)
-        const videoIdValue = videoId || 'NOT_FOUND';
-        data.push({ range: `${ESCAPED_SHEET_NAME}!E${rowNum}`, values: [[videoIdValue]] });
 
         // Write Timestamp to Column M (Pakistan Time)
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
@@ -340,12 +335,10 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
 async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink, attempt = 1) {
     const page = await browser.newPage();
     let result = {
-        advertiserName: 'SKIP',
-        appName: needsMetadata ? 'NOT_FOUND' : 'SKIP',
-        storeLink: needsMetadata ? 'NOT_FOUND' : 'SKIP',
-        videoId: 'SKIP'
+        advertiserName: 'NOT_FOUND',
+        appName: 'NOT_FOUND',
+        storeLink: 'NOT_FOUND'
     };
-    let capturedVideoId = null;
 
     // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
@@ -459,40 +452,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         };
     }, screenWidth, screenHeight);
 
-    // VIDEO ID CAPTURE + SPEED OPTIMIZATION
+    // SPEED OPTIMIZATION - Block unnecessary resources
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
-
-        // Capture video ID from googlevideo.com requests
-        if (requestUrl.includes('googlevideo.com/videoplayback')) {
-            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-            const id = urlParams.get('id');
-            if (id && /^[a-f0-9]{18}$|^[a-f0-9]{16}$/.test(id)) {
-                capturedVideoId = id;
-            }
-        }
-        // Capture from YouTube embeds
-        else if (requestUrl.includes('youtube.com/embed/')) {
-            const match = requestUrl.match(/\/embed\/([^?]+)/);
-            if (match && match[1]) {
-                capturedVideoId = match[1];
-            }
-        }
-        // Capture from YouTube get_video_info or watch
-        else if (requestUrl.includes('youtube.com/watch') || requestUrl.includes('youtube.com/get_video_info')) {
-            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-            const v = urlParams.get('video_id') || urlParams.get('v');
-            if (v && v.length >= 11) {
-                capturedVideoId = v;
-            }
-        }
-
         const resourceType = request.resourceType();
-        // Abort more resource types for speed: image, font, stylesheet (optional but fast), and tracking
-        const blockedTypes = ['image', 'font', 'other', 'stylesheet'];
+        const blockedTypes = ['image', 'font', 'other'];
         const blockedPatterns = [
-            'analytics', 'google-analytics', 'doubleclick', 'pagead',
+            'analytics', 'google-analytics', 'doubleclick',
             'facebook.com', 'bing.com', 'logs', 'collect', 'securepubads'
         ];
 
@@ -550,7 +517,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             content.toLowerCase().includes('verify you are human')) {
             console.error('  ⚠️ BLOCKED');
             await page.close();
-            return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
+            return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED' };
         }
 
         // Wait for dynamic elements to settle (increased for large datasets)
@@ -609,60 +576,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 await sleep(200 + Math.random() * 300);
             }
         } catch (e) { /* Ignore if CDP fails */ }
-
-        // =====================================================
-        // EARLY TEXT AD DETECTION - Skip text ads entirely
-        // Only process video ads for Play Store links
-        // =====================================================
-        const isTextAd = await page.evaluate(() => {
-            // Check for video elements
-            const videoEl = document.querySelector('video');
-            if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return false;
-
-            // Check page text for video indicators
-            const bodyText = document.body.innerText.toLowerCase();
-            if (bodyText.includes('format: video') || bodyText.includes('video ad')) return false;
-
-            // Check for video-related iframes/embeds
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                const src = iframe.src || '';
-                if (src.includes('youtube.com') || src.includes('googlevideo.com') || src.includes('video')) {
-                    return false;
-                }
-            }
-
-            // Check for play buttons
-            const playButtons = document.querySelectorAll('[aria-label*="play" i], .play-button, .ytp-play-button, .ytp-large-play-button');
-            if (playButtons.length > 0) return false;
-
-            // If none of the above, it's a text ad
-            return true;
-        });
-
-        if (isTextAd) {
-            console.log(`  📝 Text Ad detected - skipping (saving time)`);
-            await page.close();
-            return {
-                advertiserName: 'SKIP',
-                appName: 'SKIP',
-                storeLink: 'SKIP',
-                videoId: 'SKIP'
-            };
-        }
-
-        // Skip Apple Store ads early if we already have the store link
-        // Only process Play Store video ads
-        if (existingStoreLink && existingStoreLink.includes('apps.apple.com')) {
-            console.log(`  🍏 Apple Store ad detected - skipping (only processing Play Store)`);
-            await page.close();
-            return {
-                advertiserName: 'SKIP',
-                appName: 'SKIP',
-                storeLink: 'SKIP',
-                videoId: 'SKIP'
-            };
-        }
 
         // Human-like interaction (optimized for speed while staying safe)
         await page.evaluate(async () => {
@@ -909,151 +822,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             }
         }
 
-        // =====================================================
-        // PHASE 2: VIDEO ID EXTRACTION
-        // Only extract for Play Store video ads
-        // Text ads and Apple Store ads already skipped earlier
-        // =====================================================
-        const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
-        const isPlayStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('play.google.com');
-        const isAppleStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('apps.apple.com');
-
-        // Skip Apple Store ads (shouldn't reach here if we had existing link, but check anyway)
-        if (isAppleStore) {
-            result.videoId = 'SKIP';
-            console.log(`  🍏 Apple App - skipping video`);
-        }
-        // Only extract video ID for Play Store video ads
-        else if (isPlayStore && (needsVideoId || needsMetadata)) {
-            console.log(`  🎬 Extracting Video ID...`);
-
-            // Find and click play button (EXACT from agent.js)
-            const playButtonInfo = await page.evaluate(() => {
-                const results = { found: false, x: 0, y: 0 };
-                const searchForPlayButton = (root) => {
-                    const playSelectors = ['.play-button', '.ytp-large-play-button', '.ytp-play-button', 'video', '[aria-label*="Play" i]'];
-                    for (const sel of playSelectors) {
-                        const btn = root.querySelector(sel);
-                        if (btn) {
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width > 5 && rect.height > 5) {
-                                results.found = true;
-                                results.x = rect.left + rect.width / 2;
-                                results.y = rect.top + rect.height / 2;
-                                return true;
-                            }
-                        }
-                    }
-                    const elements = root.querySelectorAll('*');
-                    for (const el of elements) {
-                        if (el.shadowRoot) {
-                            if (searchForPlayButton(el.shadowRoot)) return true;
-                        }
-                    }
-                    return false;
-                };
-
-                const iframes = document.querySelectorAll('iframe');
-                for (let i = 0; i < iframes.length; i++) {
-                    try {
-                        const iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow?.document;
-                        if (iframeDoc) {
-                            const found = searchForPlayButton(iframeDoc);
-                            if (found) break;
-                        }
-                    } catch (e) { }
-                }
-                if (!results.found) searchForPlayButton(document);
-
-                // Fallback: click center of visible iframe
-                if (!results.found) {
-                    for (const iframe of iframes) {
-                        const rect = iframe.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            results.found = true;
-                            results.x = rect.left + rect.width / 2;
-                            results.y = rect.top + rect.height / 2;
-                            break;
-                        }
-                    }
-                }
-                return results;
-            });
-
-            if (playButtonInfo.found) {
-                try {
-                    const client = await page.target().createCDPSession();
-
-                    // More human-like mouse movement: gradual approach to button
-                    const startX = Math.random() * viewport.width;
-                    const startY = Math.random() * viewport.height;
-                    const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
-
-                    for (let i = 0; i <= steps; i++) {
-                        const progress = i / steps;
-                        const currentX = startX + (playButtonInfo.x - startX) * progress;
-                        const currentY = startY + (playButtonInfo.y - startY) * progress;
-                        await client.send('Input.dispatchMouseEvent', {
-                            type: 'mouseMoved',
-                            x: currentX,
-                            y: currentY
-                        });
-                        await sleep(50 + Math.random() * 50); // Variable speed
-                    }
-
-                    // Hover briefly before clicking (more human-like)
-                    await sleep(150 + Math.random() * 100);
-
-                    // Click with slight randomness in position
-                    const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
-                    const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
-
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mousePressed',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-                    await sleep(80 + Math.random() * 40);
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mouseReleased',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-
-                    // Wait for video to load (poll for capturedVideoId)
-                    const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
-                    const startTime = Date.now();
-                    while (Date.now() - startTime < waitTime && !capturedVideoId) {
-                        await sleep(300); // Faster polling
-                    }
-
-                    if (capturedVideoId) {
-                        result.videoId = capturedVideoId;
-                        console.log(`  ✓ Video ID: ${capturedVideoId}`);
-                    } else {
-                        result.videoId = 'NOT_FOUND';
-                        console.log(`  ⚠️ No video ID captured`);
-                    }
-                } catch (e) {
-                    console.log(`  ⚠️ Click failed: ${e.message}`);
-                    result.videoId = 'NOT_FOUND';
-                }
-            } else {
-                result.videoId = 'NOT_FOUND';
-                console.log(`  ⚠️ No play button found`);
-            }
-        }
-
         await page.close();
         return result;
     } catch (err) {
         console.error(`  ❌ Error: ${err.message}`);
         await page.close();
-        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', videoId: 'ERROR' };
+        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR' };
     }
 }
 
@@ -1072,50 +846,28 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
-        // If all fields are SKIP (text ad or Apple Store ad), return immediately - no retries needed
-        if (data.storeLink === 'SKIP' && data.appName === 'SKIP' && data.videoId === 'SKIP') {
-            return data;
-        }
+        // Success criteria: found at least app name or store link
+        const success = data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND';
 
-        // Determine if we have a valid store link (either from before or just found)
-        const currentStoreLink = (data.storeLink && data.storeLink !== 'SKIP' && data.storeLink !== 'NOT_FOUND')
-            ? data.storeLink
-            : item.existingStoreLink;
-
-        const isPlayStore = currentStoreLink && currentStoreLink.includes('play.google.com');
-        const isAppleStore = currentStoreLink && currentStoreLink.includes('apps.apple.com');
-
-        // Success criteria:
-        // 1. If we needed metadata, did we find it? (at least one of appName or storeLink)
-        const metadataSuccess = !item.needsMetadata || (data.storeLink !== 'NOT_FOUND' || data.appName !== 'NOT_FOUND');
-
-        // 2. Video ID success (SPEED OPTIMIZED):
-        // - Apple Store: always success (SKIP is fine, no retries needed)
-        // - Text ad: always success (SKIP is fine, no retries needed)
-        // - Play Store video ads: need actual video ID (NOT_FOUND = retry, SKIP = success for text ads)
-        // - Non-Play Store: always success (no video expected)
-        const videoSuccess = isAppleStore || !isPlayStore || data.videoId === 'SKIP' || (data.videoId !== 'NOT_FOUND' && data.videoId !== null);
-
-        // We only return if BOTH are successful
-        if (metadataSuccess && videoSuccess) {
+        if (success) {
             return data;
         } else {
-            console.log(`  ⚠️ Attempt ${attempt} partial success: Metadata=${metadataSuccess}, Video=${videoSuccess}. Retrying...`);
+            console.log(`  ⚠️ Attempt ${attempt} - no data found. Retrying...`);
         }
 
         await randomDelay(2000, 4000);
     }
     // If we're here, we exhausted retries. Return whatever we have.
-    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND' };
+    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND' };
 }
 
 // ============================================
 // MAIN EXECUTION
 // ============================================
 (async () => {
-    console.log(`🤖 Starting UNIFIED Google Ads Agent (BOTTOM TO TOP)...\n`);
+    console.log(`🤖 Starting App Name Extraction Agent (BOTTOM TO TOP)...\n`);
     console.log(`📋 Sheet: ${SHEET_NAME}`);
-    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Video ID\n`);
+    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name\n`);
 
     const sessionStartTime = Date.now();
     const MAX_RUNTIME = 330 * 60 * 1000;
@@ -1129,10 +881,7 @@ async function extractWithRetry(item, browser) {
     }
 
     const needsMeta = toProcess.filter(x => x.needsMetadata).length;
-    const needsVideo = toProcess.filter(x => x.needsVideoId).length;
-    console.log(`📊 Found ${toProcess.length} rows to process (from bottom to top):`);
-    console.log(`   - ${needsMeta} need metadata`);
-    console.log(`   - ${needsVideo} need video ID\n`);
+    console.log(`📊 Found ${toProcess.length} rows to process (from bottom to top)\n`);
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
@@ -1211,13 +960,12 @@ async function extractWithRetry(item, browser) {
                         rowIndex: item.rowIndex,
                         advertiserName: data.advertiserName,
                         storeLink: data.storeLink,
-                        appName: data.appName,
-                        videoId: data.videoId
+                        appName: data.appName
                     };
                 }));
 
                 results.forEach(r => {
-                    console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
+                    console.log(`  → Row ${r.rowIndex + 1}: Name=${r.appName} | Link=${r.storeLink?.substring(0, 50) || 'NOT_FOUND'}...`);
                 });
 
                 // Separate successful results from blocked ones (for logging)
