@@ -668,6 +668,79 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         // =====================================================
                         // ULTRA-PRECISE STORE LINK EXTRACTOR
                         // Only accepts REAL Play Store / App Store links
+                        // OR constructs from package name found in DOM
+                        // =====================================================
+                        
+                        // Function to find package name in ANY text/attribute in the DOM
+                        const findPackageName = () => {
+                            // Package name pattern: com.something.something (at least 2 dots, valid chars)
+                            const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
+                            const altPackageRegex = /\b([a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
+                            
+                            const foundPackages = new Set();
+                            
+                            // 1. Search in ALL href attributes
+                            const allLinks = root.querySelectorAll('a[href]');
+                            for (const link of allLinks) {
+                                const href = link.href || '';
+                                // Direct id= parameter
+                                const idMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                                if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
+                                    foundPackages.add(idMatch[1]);
+                                }
+                                // Package in URL path
+                                const matches = href.match(packageRegex);
+                                if (matches) matches.forEach(m => foundPackages.add(m));
+                            }
+                            
+                            // 2. Search in ALL data-* attributes
+                            const allElements = root.querySelectorAll('*');
+                            for (const el of allElements) {
+                                // Check all attributes
+                                for (const attr of el.attributes || []) {
+                                    const val = attr.value || '';
+                                    const matches = val.match(packageRegex);
+                                    if (matches) matches.forEach(m => foundPackages.add(m));
+                                    // Also check for id= pattern
+                                    const idMatch = val.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                                    if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
+                                        foundPackages.add(idMatch[1]);
+                                    }
+                                }
+                            }
+                            
+                            // 3. Search in script tags content
+                            const scripts = root.querySelectorAll('script');
+                            for (const script of scripts) {
+                                const content = script.textContent || '';
+                                const matches = content.match(packageRegex);
+                                if (matches) matches.forEach(m => foundPackages.add(m));
+                            }
+                            
+                            // 4. Search in inline styles and other text
+                            const html = root.innerHTML || '';
+                            const htmlMatches = html.match(packageRegex);
+                            if (htmlMatches) htmlMatches.forEach(m => foundPackages.add(m));
+                            
+                            // Filter out false positives (CSS classes, common patterns)
+                            const blacklistPatterns = ['com.google.android', 'com.android.', 'schema.org', 'w3.org'];
+                            const validPackages = [...foundPackages].filter(pkg => {
+                                if (pkg.length < 5 || pkg.length > 100) return false;
+                                if (blacklistPatterns.some(bp => pkg.startsWith(bp))) return false;
+                                if (pkg.split('.').length < 2) return false;
+                                return true;
+                            });
+                            
+                            // Return first valid package (prioritize com.* packages)
+                            const comPackages = validPackages.filter(p => p.startsWith('com.'));
+                            return comPackages[0] || validPackages[0] || null;
+                        };
+                        
+                        // Build Play Store URL from package name
+                        const buildPlayStoreUrl = (packageName) => {
+                            if (!packageName) return null;
+                            return `https://play.google.com/store/apps/details?id=${packageName}`;
+                        };
                         // =====================================================
                         const extractStoreLink = (href) => {
                             if (!href || typeof href !== 'string') return null;
@@ -704,6 +777,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (playMatch && playMatch[1]) return playMatch[1];
                                 const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
                                 if (appMatch && appMatch[1]) return appMatch[1];
+                                
+                                // Try to extract package name from href and build URL
+                                const pkgMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                                if (pkgMatch && pkgMatch[1] && pkgMatch[1].includes('.')) {
+                                    return buildPlayStoreUrl(pkgMatch[1]);
+                                }
                             } catch (e) { }
 
                             return null;
@@ -735,6 +814,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         // =====================================================
                         
                         // PRIMARY: Use the KDwhZb div class to find app name (contains span with name)
+
                         const appNameDivSelectors = [
                             'div.KDwhZb-Gxk8ed-r4nke',
                             'div[class*="KDwhZb-Gxk8ed-r4nke"]',
@@ -793,7 +873,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         }
 
                         // Backup: Install button for link
-                        if (data.appName && !data.storeLink) {
+                        if (!data.storeLink) {
                             const installSels = [
                                 'a[data-asoch-targets*="ochButton"]',
                                 'a[data-asoch-targets*="Install" i]',
@@ -811,6 +891,18 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                         break;
                                     }
                                 }
+                            }
+                        }
+
+                        // =====================================================
+                        // ULTIMATE FALLBACK: Search ENTIRE DOM for package name
+                        // If no store link found, search every tag/attribute
+                        // =====================================================
+                        if (!data.storeLink) {
+                            const packageName = findPackageName();
+                            if (packageName) {
+                                data.storeLink = buildPlayStoreUrl(packageName);
+                                console.log('Found package via DOM search:', packageName);
                             }
                         }
 
