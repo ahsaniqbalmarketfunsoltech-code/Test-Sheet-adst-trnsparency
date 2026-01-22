@@ -29,21 +29,22 @@ const SHEET_NAME = process.env.SHEET_NAME || 'Test'; // Can be overridden via en
 const ESCAPED_SHEET_NAME = SHEET_NAME.includes(' ') ? `'${SHEET_NAME}'` : SHEET_NAME;
 const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 10000; // Rows to load per batch
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
-const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 4;
-const POST_CLICK_WAIT = 6000;
-const RETRY_WAIT_MULTIPLIER = 1.25;
-const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
-const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 2; // Reduced for reliability
+const MAX_WAIT_TIME = 90000; // Increased timeout for slow loads
+const MAX_RETRIES = 5; // More retries for better success rate
+const POST_CLICK_WAIT = 8000;
+const RETRY_WAIT_MULTIPLIER = 1.5; // Slower backoff
+const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 2000; // Increased delays
+const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 5000;
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Balanced: faster but safe
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Balanced: faster but safe
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 8000; // Increased for stability
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 15000; // Increased for stability
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
-const PROXY_RETRY_DELAY_MIN = parseInt(process.env.PROXY_RETRY_DELAY_MIN) || 25000;
-const PROXY_RETRY_DELAY_MAX = parseInt(process.env.PROXY_RETRY_DELAY_MAX) || 75000;
+const PROXY_RETRY_DELAY_MIN = parseInt(process.env.PROXY_RETRY_DELAY_MIN) || 45000; // Increased cooldown
+const PROXY_RETRY_DELAY_MAX = parseInt(process.env.PROXY_RETRY_DELAY_MAX) || 120000; // Increased cooldown
+const PAGES_PER_BROWSER = parseInt(process.env.PAGES_PER_BROWSER) || 15; // Fewer pages per browser for freshness
 
 function pickProxy() {
     if (!PROXIES.length) return null;
@@ -179,7 +180,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
         try {
             // Calculate start row for this batch (working backwards)
             const startRow = Math.max(2, endRow - batchSize + 1); // Row 2 is first data row (skip header)
-            const range = `${ESCAPED_SHEET_NAME}!A${startRow}:E${endRow}`;
+            const range = `${ESCAPED_SHEET_NAME}!A${startRow}:F${endRow}`;
 
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
@@ -200,29 +201,14 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 const url = row[1]?.trim() || '';
                 const storeLink = row[2]?.trim() || '';
                 const appName = row[3]?.trim() || '';
-                const videoId = row[4]?.trim() || '';
+                const appSubtitle = row[5]?.trim() || '';
 
                 // Skip if no URL
                 if (!url) continue;
 
-                // Skip rows that already have ANY value in column C (storeLink)
-                // This means they've been processed (whether SKIP, BLOCKED, NOT_FOUND, or actual data)
-                if (storeLink) {
-                    // Only exception: if it has a valid Play Store link but missing video ID
-                    const hasValidStoreLink = storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com');
-                    const needsVideoId = hasValidStoreLink && !videoId;
-
-                    if (needsVideoId) {
-                        toProcess.push({
-                            url,
-                            rowIndex: actualRowIndex,
-                            needsMetadata: false,
-                            needsVideoId: true,
-                            existingStoreLink: storeLink
-                        });
-                    }
-                    continue; // Skip - already has data in column C
-                }
+                // Skip rows that already have ANY extracted data in columns C, D, or F
+                // Treat any existing value as processed so we only handle empty rows
+                if (storeLink || appName || appSubtitle) continue;
 
                 // Row has no storeLink - needs processing
                 toProcess.push({
@@ -526,12 +512,20 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (increased for large datasets)
-        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
+        // Wait for dynamic elements to settle - CRITICAL for reliability
+        const baseWait = 6000 + Math.random() * 3000; // 6-9 seconds base wait
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
-        // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
+        // Wait for network to be truly idle (no pending requests)
+        try {
+            await page.waitForNetworkIdle({ idleTime: 2000, timeout: 15000 });
+        } catch (e) {
+            // Continue even if timeout - page may still have data
+            console.log(`    ⚠️ Network idle timeout, continuing...`);
+        }
+
+        // Additional wait specifically for iframes to render (critical for Play Store links)
         try {
             await page.evaluate(async () => {
                 const iframes = document.querySelectorAll('iframe');
@@ -542,7 +536,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         const checkLoaded = () => {
                             loaded++;
                             if (loaded >= totalIframes) {
-                                setTimeout(resolve, 1500); // Extra time after all iframes load
+                                setTimeout(resolve, 2500); // Extra time after all iframes load
                             }
                         };
                         iframes.forEach(iframe => {
@@ -551,8 +545,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     checkLoaded();
                                 } else {
                                     iframe.onload = checkLoaded;
-                                    // Timeout after 4 seconds per iframe
-                                    setTimeout(checkLoaded, 4000);
+                                    // Timeout after 6 seconds per iframe
+                                    setTimeout(checkLoaded, 6000);
                                 }
                             } catch (e) {
                                 // Cross-origin iframe, count as loaded
@@ -564,9 +558,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     });
                 }
             });
+            // Extra buffer for iframe content to populate
+            await sleep(1500);
         } catch (e) {
-            // If iframe check fails, wait a bit anyway
-            await sleep(1000);
+            // If iframe check fails, wait longer
+            await sleep(2500);
         }
 
         // Random mouse movements for more human-like behavior
@@ -1067,9 +1063,9 @@ async function extractWithRetry(item, browser) {
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-    const PAGES_PER_BROWSER = 30; // Balanced: faster but safe
     let currentIndex = 0;
     let consecutiveSuccessBatches = 0;
+    let totalNotFoundCount = 0; // Track NOT_FOUND to detect issues
 
     while (currentIndex < toProcess.length) {
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
@@ -1092,7 +1088,15 @@ async function extractWithRetry(item, browser) {
             '--no-zygote',
             '--single-process',
             '--disable-software-rasterizer',
-            '--no-first-run'
+            '--no-first-run',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-sync',
+            '--disable-translate',
+            '--metrics-recording-only',
+            '--disable-default-apps',
+            '--mute-audio',
+            '--incognito' // Fresh session each time - prevents cookie accumulation
         ];
 
         const proxy = pickProxy();
@@ -1151,18 +1155,35 @@ async function extractWithRetry(item, browser) {
                     console.log(`  → Row ${r.rowIndex + 1}: Name=${r.appName} | Subtitle=${r.appSubtitle?.substring(0, 30) || 'NOT_FOUND'}... | Link=${r.storeLink?.substring(0, 40) || 'NOT_FOUND'}`);
                 });
 
-                // Separate successful results from blocked ones (for logging)
-                const successfulResults = results.filter(r => r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED');
+                // Separate results by status for logging and handling
+                const successfulResults = results.filter(r => 
+                    r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED' &&
+                    r.storeLink !== 'NOT_FOUND' && r.appName !== 'NOT_FOUND' &&
+                    r.storeLink !== 'ERROR' && r.appName !== 'ERROR'
+                );
                 const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
+                const notFoundResults = results.filter(r => 
+                    (r.storeLink === 'NOT_FOUND' && r.appName === 'NOT_FOUND') &&
+                    r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED'
+                );
+                
+                // Track NOT_FOUND for potential issues
+                totalNotFoundCount += notFoundResults.length;
+                
+                // If too many NOT_FOUND in a row, browser might be stale - force rotation
+                if (notFoundResults.length >= batchSize * 0.8) {
+                    console.log(`  ⚠️ High NOT_FOUND rate (${notFoundResults.length}/${batchSize}). Browser may be stale, rotating...`);
+                    blocked = true; // Force browser rotation
+                }
 
-                // WRITE ALL RESULTS TO SHEET (including blocked ones)
-                // This ensures blocked rows get marked and won't be reprocessed
+                // WRITE ALL RESULTS TO SHEET (including blocked/not_found)
+                // This ensures processed rows get marked and won't be reprocessed
                 if (results.length > 0) {
                     await batchWriteToSheet(sheets, results);
-                    console.log(`  ✅ Wrote ${results.length} results to sheet (${successfulResults.length} successful, ${blockedResults.length} blocked)`);
+                    console.log(`  ✅ Wrote ${results.length} results (${successfulResults.length} success, ${notFoundResults.length} not_found, ${blockedResults.length} blocked)`);
 
                     // Add cooldown after each write to prevent rate limits
-                    await sleep(1000 + Math.random() * 1000); // 1-2 second cooldown
+                    await sleep(2000 + Math.random() * 2000); // 2-4 second cooldown
                 }
 
                 // Progress status every 10 batches
@@ -1193,8 +1214,8 @@ async function extractWithRetry(item, browser) {
             }
 
             if (!blocked) {
-                // Adaptive delay: reduce delay if we're having success (faster processing)
-                const adaptiveMultiplier = Math.max(0.7, 1 - (consecutiveSuccessBatches * 0.05)); // Reduce delay by 5% per successful batch, min 70%
+                // Conservative adaptive delay - don't reduce below 90% to maintain reliability
+                const adaptiveMultiplier = Math.max(0.9, 1 - (consecutiveSuccessBatches * 0.02)); // Reduce delay by 2% per successful batch, min 90%
                 const adjustedMin = BATCH_DELAY_MIN * adaptiveMultiplier;
                 const adjustedMax = BATCH_DELAY_MAX * adaptiveMultiplier;
                 const batchDelay = adjustedMin + Math.random() * (adjustedMax - adjustedMin);
@@ -1203,10 +1224,22 @@ async function extractWithRetry(item, browser) {
             }
         }
 
+        // Properly close browser and clear resources
         try {
+            const pages = await browser.pages();
+            for (const p of pages) {
+                try { await p.close(); } catch (e) { }
+            }
             await browser.close();
-            await sleep(2000);
-        } catch (e) { }
+            await sleep(3000); // Longer cooldown between browser sessions
+        } catch (e) { 
+            console.log(`  ⚠️ Browser close error: ${e.message}`);
+        }
+        
+        // Force garbage collection if available (helps with memory in long runs)
+        if (global.gc) {
+            try { global.gc(); } catch (e) { }
+        }
 
         if (blocked) {
             const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
@@ -1221,6 +1254,7 @@ async function extractWithRetry(item, browser) {
     }
 
     console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
+    console.log(`📊 Total NOT_FOUND: ${totalNotFoundCount}`);
     console.log('\n🏁 Complete.');
     process.exit(0);
 })();
