@@ -324,13 +324,21 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
 // Both metadata + video ID extracted on same page
 // ============================================
 async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink, attempt = 1) {
-    const page = await browser.newPage();
+    let page;
     let result = {
         advertiserName: 'NOT_FOUND',
         appName: 'NOT_FOUND',
         storeLink: 'NOT_FOUND',
         appSubtitle: 'NOT_FOUND'
     };
+
+    // Create page with error handling for browser crashes
+    try {
+        page = await browser.newPage();
+    } catch (pageErr) {
+        console.error(`  ❌ Failed to create page: ${pageErr.message}`);
+        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', appSubtitle: 'ERROR' };
+    }
 
     // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
@@ -1085,8 +1093,7 @@ async function extractWithRetry(item, browser) {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--no-zygote',
-            '--single-process',
+            // Removed --no-zygote and --single-process - they cause crashes
             '--disable-software-rasterizer',
             '--no-first-run',
             '--disable-extensions',
@@ -1127,6 +1134,18 @@ async function extractWithRetry(item, browser) {
         // Reset adaptive counter for each browser session
         consecutiveSuccessBatches = 0;
 
+        // Verify browser is healthy before processing
+        try {
+            const testPage = await browser.newPage();
+            await testPage.close();
+            console.log(`  ✓ Browser healthy`);
+        } catch (healthErr) {
+            console.error(`  ❌ Browser unhealthy: ${healthErr.message}. Restarting...`);
+            try { await browser.close(); } catch (e) { }
+            await sleep(3000);
+            continue; // Restart browser session
+        }
+
         while (sessionProcessed < currentSessionSize && !blocked) {
             const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
             const batch = toProcess.slice(currentIndex, currentIndex + batchSize);
@@ -1134,22 +1153,61 @@ async function extractWithRetry(item, browser) {
             console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length}`);
 
             try {
-                // Stagger page loads to avoid blocks - add delay between each concurrent page
-                const results = await Promise.all(batch.map(async (item, index) => {
+                // Check if browser is still connected before processing batch
+                if (!browser.isConnected()) {
+                    console.log(`  ⚠️ Browser disconnected. Restarting session...`);
+                    blocked = true;
+                    break;
+                }
+
+                // Process pages sequentially to avoid browser overload
+                const results = [];
+                for (let index = 0; index < batch.length; index++) {
+                    const item = batch[index];
+                    
                     // Add random delay before starting each page (staggered)
                     if (index > 0) {
                         const staggerDelay = PAGE_LOAD_DELAY_MIN + Math.random() * (PAGE_LOAD_DELAY_MAX - PAGE_LOAD_DELAY_MIN);
-                        await sleep(staggerDelay * index); // Each page waits progressively longer
+                        await sleep(staggerDelay);
                     }
-                    const data = await extractWithRetry(item, browser);
-                    return {
-                        rowIndex: item.rowIndex,
-                        advertiserName: data.advertiserName,
-                        storeLink: data.storeLink,
-                        appName: data.appName,
-                        appSubtitle: data.appSubtitle
-                    };
-                }));
+                    
+                    try {
+                        const data = await extractWithRetry(item, browser);
+                        results.push({
+                            rowIndex: item.rowIndex,
+                            advertiserName: data.advertiserName,
+                            storeLink: data.storeLink,
+                            appName: data.appName,
+                            appSubtitle: data.appSubtitle
+                        });
+                    } catch (itemErr) {
+                        console.error(`  ❌ Item ${item.rowIndex + 1} error: ${itemErr.message}`);
+                        results.push({
+                            rowIndex: item.rowIndex,
+                            advertiserName: 'ERROR',
+                            storeLink: 'ERROR',
+                            appName: 'ERROR',
+                            appSubtitle: 'ERROR'
+                        });
+                        
+                        // If we get a protocol error, browser is dead
+                        if (itemErr.message.includes('Protocol error') || itemErr.message.includes('Target closed')) {
+                            console.log(`  ⚠️ Browser crashed. Restarting session...`);
+                            blocked = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (blocked) {
+                    // Still write whatever results we got before the crash
+                    if (results.length > 0) {
+                        await batchWriteToSheet(sheets, results);
+                        currentIndex += results.length;
+                        sessionProcessed += results.length;
+                    }
+                    break;
+                }
 
                 results.forEach(r => {
                     console.log(`  → Row ${r.rowIndex + 1}: Name=${r.appName} | Subtitle=${r.appSubtitle?.substring(0, 30) || 'NOT_FOUND'}... | Link=${r.storeLink?.substring(0, 40) || 'NOT_FOUND'}`);
