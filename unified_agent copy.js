@@ -340,15 +340,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', appSubtitle: 'ERROR' };
     }
 
-    // Clean name function - removes CSS garbage and normalizes (Unicode-safe)
+    // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
         if (!name) return 'NOT_FOUND';
         let cleaned = name.trim();
 
-        // Remove only invisible unicode characters (keep all visible text in any language)
-        cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069\u00AD]/g, '');
+        // Remove invisible unicode
+        cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
 
-        // Remove CSS-like patterns (only ASCII patterns)
+        // Remove CSS-like patterns
         cleaned = cleaned.replace(/[a-zA-Z-]+\s*:\s*[^;]+;?/g, ' ');
         cleaned = cleaned.replace(/\d+px/g, ' ');
         cleaned = cleaned.replace(/\*+/g, ' ');
@@ -363,17 +363,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         // Normalize whitespace
         cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
-        // Relaxed length check for multi-language support
-        if (cleaned.length < 1 || cleaned.length > 100) return 'NOT_FOUND';
+        // Length check
+        if (cleaned.length < 2 || cleaned.length > 80) return 'NOT_FOUND';
 
-        // Reject if looks like CSS (only check ASCII patterns)
-        if (/:\s*\d/.test(cleaned) || /^[a-z]+:\s/i.test(cleaned)) {
-            return 'NOT_FOUND';
-        }
-        
-        // Reject known bad values
-        const lower = cleaned.toLowerCase();
-        if (lower === 'ad details' || lower === 'google ads' || lower === 'install' || lower === 'open') {
+        // Reject if looks like CSS
+        if (/:\s*\d/.test(cleaned) || cleaned.includes('height') || cleaned.includes('width') || cleaned.includes('font')) {
             return 'NOT_FOUND';
         }
 
