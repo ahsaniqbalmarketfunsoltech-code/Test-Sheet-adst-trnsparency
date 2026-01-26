@@ -1,4 +1,4 @@
-name: Unified Google Ads Agent (Bottom to Top)
+name: Text Ads Extraction Agent (Bottom to Top)
 
 on:
   schedule:
@@ -9,7 +9,7 @@ on:
       sheet_name:
         description: 'Sheet/Tab name to process'
         required: false
-        default: 'Test'
+        default: 'Text Ads data'
         type: string
 
 jobs:
@@ -44,7 +44,7 @@ jobs:
       
       - name: Run Unified Agent
         env:
-          SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Test data' }}
+          SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Text Ads data' }}
           SHEET_BATCH_SIZE: ${{ secrets.SHEET_BATCH_SIZE || '10000' }}
           CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '3' }}
           BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '5000' }}
@@ -53,7 +53,7 @@ jobs:
           PAGE_LOAD_DELAY_MAX: ${{ secrets.PAGE_LOAD_DELAY_MAX || '3000' }}
           PROXIES: ${{ secrets.PROXIES }}
           PUPPETEER_EXECUTABLE_PATH: ${{ secrets.PUPPETEER_EXECUTABLE_PATH }}
-        run: node "unified_agent copy.js"
+        run: node text_ads_extraction.js
       
       - name: Cleanup credentials
         if: always()
