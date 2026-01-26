@@ -793,22 +793,29 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         };
 
                         // =====================================================
-                        // CLEAN APP NAME
+                        // CLEAN APP NAME - Unicode/Multi-language safe
                         // =====================================================
                         const cleanAppName = (text) => {
                             if (!text || typeof text !== 'string') return null;
                             let clean = text.trim();
-                            clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
+                            // Remove invisible Unicode characters only
+                            clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069\u00AD]/g, '');
+                            // Remove CSS-like patterns (only ASCII)
                             clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
                             clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
+                            // Remove markers
                             clean = clean.split('!@~!@~')[0];
                             if (clean.includes('|')) {
                                 const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
                                 if (parts.length > 0) clean = parts[0];
                             }
                             clean = clean.replace(/\s+/g, ' ').trim();
-                            if (clean.length < 2 || clean.length > 80) return null;
-                            if (/^[\d\s\W]+$/.test(clean)) return null;
+                            if (clean.length < 1 || clean.length > 100) return null;
+                            // Only reject if it's ONLY ASCII digits/punctuation (keep ALL Unicode letters)
+                            if (/^[\d\s.,!?@#$%^&*()\-_=+\[\]{}|\\;:'"<>\/`~]+$/.test(clean)) return null;
+                            // Reject common non-app-name text
+                            const lower = clean.toLowerCase();
+                            if (lower === 'install' || lower === 'open' || lower === 'get' || lower === 'download') return null;
                             return clean;
                         };
 
@@ -825,7 +832,17 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             'div[class*="KDwhZb"][class*="Gxk8ed"]',
                             'div.cS4Vcb-kb9wTc',
                             'div[class*="cS4Vcb-kb9wTc"]',
-                            'div[class*="cS4Vcb-pGL6qe-c0XB9d"]'
+                            'div[class*="cS4Vcb-pGL6qe-c0XB9d"]',
+                            // Additional selectors for multi-language support
+                            '[data-asoch-targets*="AppName"]',
+                            '[data-asoch-targets*="appName"]',
+                            '[data-asoch-targets*="app_name"]',
+                            '.app-name',
+                            '[class*="app-name"]',
+                            '[class*="appName"]',
+                            '[class*="title"][class*="app"]',
+                            'div[role="heading"]',
+                            'span[role="heading"]'
                         ];
 
                         // First try to get app name from the KDwhZb div (span inside)
@@ -910,20 +927,29 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
-                        // Fallback for app name only (if KDwhZb didn't find it)
+                        // Fallback for app name only (if primary selectors didn't find it)
                         if (!data.appName) {
                             const textSels = [
                                 'div[class*="KDwhZb"] span',
                                 '[role="heading"]', 
                                 'div[class*="app-name"]', 
-                                '.app-title'
+                                '.app-title',
+                                // More fallback selectors
+                                '[class*="title"]',
+                                'h1', 'h2', 'h3',
+                                'strong',
+                                '[class*="name"]'
                             ];
                             for (const sel of textSels) {
                                 const elements = root.querySelectorAll(sel);
                                 for (const el of elements) {
                                     const rawName = el.innerText || el.textContent || '';
                                     const appName = cleanAppName(rawName);
-                                    if (appName && appName.toLowerCase() !== blacklist) {
+                                    // Accept any language - just check it's not the advertiser name
+                                    if (appName && appName.toLowerCase() !== blacklist && 
+                                        !appName.toLowerCase().includes('ad details') &&
+                                        !appName.toLowerCase().includes('google ads') &&
+                                        appName.length > 1) {
                                         data.appName = appName;
                                         break;
                                     }
@@ -931,6 +957,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (data.appName) break;
                             }
                         }
+                        
+                        // LAST RESORT: Use subtitle as app name if we have subtitle but no name
+                        // (sometimes the app name is only in subtitle position)
 
                         // =====================================================
                         // EXTRACT APP SUBTITLE/HEADLINE using cS4Vcb-vnv8ic class
@@ -944,25 +973,41 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 '[data-asoch-targets*="Headline"]',
                                 '[data-asoch-targets*="Description"]',
                                 '.description',
-                                'div[class*="description"]'
+                                'div[class*="description"]',
+                                // Additional subtitle selectors
+                                '[class*="subtitle"]',
+                                '[class*="tagline"]',
+                                'p',
+                                'span[class*="text"]'
                             ];
                             for (const sel of subtitleSelectors) {
                                 const els = root.querySelectorAll(sel);
                                 for (const el of els) {
                                     let text = (el.innerText || el.textContent || '').trim();
-                                    text = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+                                    // Only remove invisible characters, keep all language text
+                                    text = text.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '');
                                     // Skip if same as app name or too short/long
-                                    if (text && text.length > 2 && text.length < 150 && text !== data.appName) {
-                                        // Filter out button text
+                                    if (text && text.length > 2 && text.length < 200 && text !== data.appName) {
+                                        // Filter out button text only (keep all language text)
                                         const lower = text.toLowerCase();
-                                        const blacklistSub = ['install', 'open', 'download', 'play', 'get', 'ad details', 'google play'];
-                                        if (!blacklistSub.some(b => lower === b)) {
+                                        const blacklistSub = ['install', 'open', 'download', 'play', 'get', 'ad details', 'google play', 'app store'];
+                                        if (!blacklistSub.some(b => lower === b || lower === b + ' now')) {
                                             data.appSubtitle = text;
                                             break;
                                         }
                                     }
                                 }
                                 if (data.appSubtitle) break;
+                            }
+                        }
+                        
+                        // If we still don't have app name but have subtitle, use part of subtitle
+                        if (!data.appName && data.appSubtitle) {
+                            // Take first sentence or first 50 chars as potential app name
+                            let potentialName = data.appSubtitle.split(/[.!?،。！？]/)[0].trim();
+                            if (potentialName.length > 50) potentialName = potentialName.substring(0, 50).trim();
+                            if (potentialName.length > 2) {
+                                data.appName = potentialName;
                             }
                         }
 
