@@ -1,0 +1,70 @@
+name: Text Ads Extraction Agent (Top to Bottom)
+
+on:
+  schedule:
+    - cron: '0 0,6,12,18 * * *' # Run 4 times per day
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      sheet_name:
+        description: 'Sheet/Tab name to process'
+        required: false
+        default: 'Text Ads data'
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max runtime
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install system dependencies for Puppeteer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgbm1 libasound2t64 libnss3 libxss1 libatk-bridge2.0-0 libgtk-3-0 libxshmfence1
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Create credentials file
+        run: echo "$GOOGLE_CREDENTIALS" > credentials.json
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      
+      - name: Run Text Ads Extraction Agent (Top to Bottom)
+        env:
+          SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Text Ads data' }}
+          SHEET_BATCH_SIZE: ${{ secrets.SHEET_BATCH_SIZE || '10000' }}
+          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '3' }}
+          BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '5000' }}
+          BATCH_DELAY_MAX: ${{ secrets.BATCH_DELAY_MAX || '10000' }}
+          PAGE_LOAD_DELAY_MIN: ${{ secrets.PAGE_LOAD_DELAY_MIN || '1000' }}
+          PAGE_LOAD_DELAY_MAX: ${{ secrets.PAGE_LOAD_DELAY_MAX || '3000' }}
+          PROXIES: ${{ secrets.PROXIES }}
+          PUPPETEER_EXECUTABLE_PATH: ${{ secrets.PUPPETEER_EXECUTABLE_PATH }}
+        run: node text_ads_extraction_top_to_bottom.js
+      
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
+      
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-logs
+          path: |
+            *.log
+            npm-debug.log*
+          retention-days: 7
