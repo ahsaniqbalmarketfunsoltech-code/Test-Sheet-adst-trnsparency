@@ -123,8 +123,15 @@ async function getGoogleSheetsClient() {
 async function fetchFromSourceSheet(sheets, sheetConfig) {
     const { id, name, sheetName, sheetNames } = sheetConfig;
     
-    // Support both single tab (sheetName) and multiple tabs (sheetNames array)
-    const tabsToProcess = sheetNames || [sheetName || 'Sheet1'];
+    // Support both single tab (sheetName) and multiple tabs (sheetNames - can be array or string)
+    let tabsToProcess;
+    if (sheetNames) {
+        // Handle sheetNames as either array or single string
+        tabsToProcess = Array.isArray(sheetNames) ? sheetNames : [sheetNames];
+    } else {
+        tabsToProcess = [sheetName || 'Sheet1'];
+    }
+    
     const allValidRows = [];
     
     console.log(`\n📖 Reading from: ${name} (${id})`);
