@@ -1015,175 +1015,160 @@ async function extractWithRetry(item, browser) {
     }
     // If we're here, we exhausted retries. Return whatever we have.
     return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', appSubtitle: 'NOT_FOUND' };
-    // ============================================
-    // MAIN EXECUTION - OPTIMIZED STREAMING MODE
-    // ============================================
-    (async () => {
-        console.log(`🤖 Starting Text Ads Extraction Agent (TOP TO BOTTOM - STREAMING)...\n`);
-        console.log(`📋 Sheet: ${SHEET_NAME}`);
-        console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Headline`);
-        console.log(`🚀 Mode: STREAMING (processes immediately, minimal memory)\n`);
+}
 
-        const sessionStartTime = Date.now();
-        const MAX_RUNTIME = 330 * 60 * 1000; // 5.5 hours
+// ============================================
+// MAIN EXECUTION - OPTIMIZED STREAMING MODE
+// ============================================
+(async () => {
+    console.log(`🤖 Starting Text Ads Extraction Agent (TOP TO BOTTOM - STREAMING)...\n`);
+    console.log(`📋 Sheet: ${SHEET_NAME}`);
+    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Headline`);
+    console.log(`🚀 Mode: STREAMING (processes immediately, minimal memory)\n`);
 
-        const sheets = await getGoogleSheetsClient();
+    const sessionStartTime = Date.now();
+    const MAX_RUNTIME = 330 * 60 * 1000; // 5.5 hours
 
-        // Get total row count quickly (just metadata call)
-        const totalRows = await getTotalRowCount(sheets);
-        console.log(`📊 Sheet has ${totalRows} total rows`);
-        console.log(` Starting from row 2, processing to row ${totalRows}\n`);
+    const sheets = await getGoogleSheetsClient();
 
-        console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
+    // Get total row count quickly (just metadata call)
+    const totalRows = await getTotalRowCount(sheets);
+    console.log(`📊 Sheet has ${totalRows} total rows`);
+    console.log(` Starting from row 2, processing to row ${totalRows}\n`);
 
-        let currentRow = 2; // Start from row 2 (skip header)
-        let totalProcessed = 0;
-        let totalScanned = 0;
-        let totalNotFoundCount = 0;
-        let consecutiveSuccessBatches = 0;
-        let consecutiveEmptyScanIterations = 0;
-        const MAX_EMPTY_SCANS = 10;
-        let rowsQueue = []; // Queue for unprocessed rows found during streaming
+    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-        while (currentRow <= totalRows || rowsQueue.length > 0) {
-            if (Date.now() - sessionStartTime > MAX_RUNTIME) {
-                console.log('\n⏰ Time limit reached. Stopping.');
+    let currentRow = 2; // Start from row 2 (skip header)
+    let totalProcessed = 0;
+    let totalScanned = 0;
+    let totalNotFoundCount = 0;
+    let consecutiveSuccessBatches = 0;
+    let consecutiveEmptyScanIterations = 0;
+    const MAX_EMPTY_SCANS = 10;
+    let rowsQueue = []; // Queue for unprocessed rows found during streaming
+
+    while (currentRow <= totalRows || rowsQueue.length > 0) {
+        if (Date.now() - sessionStartTime > MAX_RUNTIME) {
+            console.log('\n⏰ Time limit reached. Stopping.');
+            break;
+        }
+
+        // 🏢 Start a new browser session
+        console.log(`\n🏢 Starting Browser Session (Current Row: ${currentRow}, Queue: ${rowsQueue.length})`);
+
+        let launchArgs = [
+            '--autoplay-policy=no-user-gesture-required',
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--no-first-run',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-sync',
+            '--disable-translate',
+            '--metrics-recording-only',
+            '--disable-default-apps',
+            '--mute-audio',
+            '--incognito'
+        ];
+
+        const proxy = pickProxy();
+        if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
+        console.log(`  🌐 Proxy: ${proxy || 'DIRECT'}`);
+
+        let browser;
+        try {
+            browser = await puppeteer.launch({ headless: 'new', args: launchArgs, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null });
+        } catch (e) {
+            console.error(`  ❌ Launch failed: ${e.message}`);
+            await sleep(5000);
+            continue;
+        }
+
+        let sessionProcessed = 0;
+        let blocked = false;
+
+        // Process up to PAGES_PER_BROWSER in this browser context
+        while (sessionProcessed < PAGES_PER_BROWSER && !blocked) {
+            // 1. Refill rowsQueue if it's empty
+            if (rowsQueue.length === 0 && currentRow <= totalRows) {
+                console.log(`  📥 Scanning next ${STREAM_BATCH_SIZE} rows starting at ${currentRow}...`);
+                const batchResult = await getNextBatch(sheets, currentRow, STREAM_BATCH_SIZE);
+
+                totalScanned += (batchResult.scannedCount || 0);
+                currentRow = batchResult.nextStartRow;
+                rowsQueue = batchResult.rows;
+
+                if (rowsQueue.length === 0) {
+                    if (!batchResult.hasMore) {
+                        consecutiveEmptyScanIterations++;
+                        if (consecutiveEmptyScanIterations >= MAX_EMPTY_SCANS) {
+                            console.log(`  ✨ Reached end of data.`);
+                            break;
+                        }
+                    }
+                    console.log(`  ⏭️ No work found in this chunk, scanning next...`);
+                    continue;
+                }
+                consecutiveEmptyScanIterations = 0;
+                console.log(`  ✓ Found ${rowsQueue.length} unprocessed rows in this chunk.`);
+            }
+
+            // If we have nothing left to do and queue is still empty
+            if (rowsQueue.length === 0) break;
+
+            // 2. Take a batch from the queue to process concurrently
+            const batchToProcess = rowsQueue.splice(0, Math.min(CONCURRENT_PAGES, rowsQueue.length));
+            console.log(`📦 Processing batch of ${batchToProcess.length} rows (${rowsQueue.length} remaining in queue)...`);
+
+            if (!browser.isConnected()) {
+                console.log(`  ⚠️ Browser disconnected.`);
+                blocked = true;
                 break;
             }
 
-            // 🏢 Start a new browser session
-            console.log(`\n🏢 Starting Browser Session (Current Row: ${currentRow}, Queue: ${rowsQueue.length})`);
+            // 3. Extract data for these rows
+            const results = [];
+            for (let i = 0; i < batchToProcess.length; i++) {
+                const item = batchToProcess[i];
+                if (i > 0) await sleep(PAGE_LOAD_DELAY_MIN + Math.random() * 1000);
 
-            let launchArgs = [
-                '--autoplay-policy=no-user-gesture-required',
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--no-first-run',
-                '--disable-extensions',
-                '--disable-background-networking',
-                '--disable-sync',
-                '--disable-translate',
-                '--metrics-recording-only',
-                '--disable-default-apps',
-                '--mute-audio',
-                '--incognito'
-            ];
-
-            const proxy = pickProxy();
-            if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
-            console.log(`  🌐 Proxy: ${proxy || 'DIRECT'}`);
-
-            let browser;
-            try {
-                browser = await puppeteer.launch({ headless: 'new', args: launchArgs, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null });
-            } catch (e) {
-                console.error(`  ❌ Launch failed: ${e.message}`);
-                await sleep(5000);
-                continue;
+                try {
+                    const data = await extractWithRetry(item, browser);
+                    results.push({ ...data, rowIndex: item.rowIndex });
+                } catch (err) {
+                    console.error(`  ❌ Row ${item.rowIndex + 1} error: ${err.message}`);
+                    results.push({ rowIndex: item.rowIndex, advertiserName: 'ERROR', storeLink: 'ERROR', appName: 'ERROR', appSubtitle: 'ERROR' });
+                }
             }
 
-            let sessionProcessed = 0;
-            let blocked = false;
+            // 4. Log and Write results
+            results.forEach(r => console.log(`  → Row ${r.rowIndex + 1}: ${r.appName} | ${r.appSubtitle?.substring(0, 30)}...`));
 
-            // Process up to PAGES_PER_BROWSER in this browser context
-            while (sessionProcessed < PAGES_PER_BROWSER && !blocked) {
-                // 1. Refill rowsQueue if it's empty
-                if (rowsQueue.length === 0 && currentRow <= totalRows) {
-                    console.log(`  📥 Scanning next ${STREAM_BATCH_SIZE} rows starting at ${currentRow}...`);
-                    const batchResult = await getNextBatch(sheets, currentRow, STREAM_BATCH_SIZE);
+            if (results.length > 0) {
+                await batchWriteToSheet(sheets, results);
+                totalProcessed += results.length;
+                sessionProcessed += results.length;
 
-                    totalScanned += (batchResult.scannedCount || 0);
-                    currentRow = batchResult.nextStartRow;
-                    rowsQueue = batchResult.rows;
-
-                    if (rowsQueue.length === 0) {
-                        if (!batchResult.hasMore) {
-                            consecutiveEmptyScanIterations++;
-                            if (consecutiveEmptyScanIterations >= MAX_EMPTY_SCANS) {
-                                console.log(`  ✨ Reached end of data.`);
-                                break;
-                            }
-                        }
-                        console.log(`  ⏭️ No work found in this chunk, scanning next...`);
-                        continue;
-                    }
-                    consecutiveEmptyScanIterations = 0;
-                    console.log(`  ✓ Found ${rowsQueue.length} unprocessed rows in this chunk.`);
-                }
-
-                // If we have nothing left to do and queue is still empty
-                if (rowsQueue.length === 0) break;
-
-                // 2. Take a batch from the queue to process concurrently
-                const batchToProcess = rowsQueue.splice(0, Math.min(CONCURRENT_PAGES, rowsQueue.length));
-                console.log(`📦 Processing batch of ${batchToProcess.length} rows (${rowsQueue.length} remaining in queue)...`);
-
-                if (!browser.isConnected()) {
-                    console.log(`  ⚠️ Browser disconnected.`);
+                const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
+                if (blockedResults.length > 0) {
+                    console.log(`  🛑 Block detected. Rotating browser...`);
                     blocked = true;
-                    break;
                 }
 
-                // 3. Extract data for these rows
-                const results = [];
-                for (let i = 0; i < batchToProcess.length; i++) {
-                    const item = batchToProcess[i];
-                    if (i > 0) await sleep(PAGE_LOAD_DELAY_MIN + Math.random() * 1000);
-
-                    try {
-                        const data = await extractWithRetry(item, browser);
-                        results.push({ ...data, rowIndex: item.rowIndex });
-                    } catch (err) {
-                        console.error(`  ❌ Row ${item.rowIndex + 1} error: ${err.message}`);
-                        results.push({ rowIndex: item.rowIndex, advertiserName: 'ERROR', storeLink: 'ERROR', appName: 'ERROR', appSubtitle: 'ERROR' });
-                    }
-                }
-
-                // 4. Log and Write results
-                results.forEach(r => console.log(`  → Row ${r.rowIndex + 1}: ${r.appName} | ${r.appSubtitle?.substring(0, 30)}...`));
-
-                if (results.length > 0) {
-                    await batchWriteToSheet(sheets, results);
-                    totalProcessed += results.length;
-                    sessionProcessed += results.length;
-
-                    const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
-                    if (blockedResults.length > 0) {
-                        console.log(`  🛑 Block detected. Rotating browser...`);
-                        blocked = true;
-                    }
-
-                    const progress = Math.round((currentRow / totalRows) * 100);
-                    const elapsed = Math.floor((Date.now() - sessionStartTime) / 60000);
-                    console.log(`  ✅ Wrote results. Progress: ~${progress}% | Runtime: ${elapsed}m\n`);
-                }
-
-                if (!blocked) await sleep(BATCH_DELAY_MIN + Math.random() * 2000);
+                const progress = Math.round((currentRow / totalRows) * 100);
+                const elapsed = Math.floor((Date.now() - sessionStartTime) / 60000);
+                console.log(`  ✅ Wrote results. Progress: ~${progress}% | Runtime: ${elapsed}m\n`);
             }
 
-            try { await browser.close(); } catch (e) { }
-            if (blocked) await sleep(PROXY_RETRY_DELAY_MIN + Math.random() * 10000);
-        }
-        // Close browser
-        try {
-            const pages = await browser.pages();
-            for (const p of pages) {
-                try { await p.close(); } catch (e) { }
-            }
-            await browser.close();
-            await sleep(2000);
-        } catch (e) {
-            console.log(`  ⚠️ Browser close error: ${e.message}`);
+            if (!blocked) await sleep(BATCH_DELAY_MIN + Math.random() * 2000);
         }
 
-        // GC if available
-        if (global.gc) {
-            try { global.gc(); } catch (e) { }
-        }
+        // Cleanup browser
+        try { await browser.close(); } catch (e) { }
 
         // Block cooldown
         if (blocked) {
@@ -1191,10 +1176,13 @@ async function extractWithRetry(item, browser) {
             console.log(`  ⏳ Block cooldown: ${Math.round(wait / 1000)}s...`);
             await sleep(wait);
         }
+
+        // Force GC if possible
+        if (global.gc) { try { global.gc(); } catch (e) { } }
     }
 
-        // Final stats
-        console.log('\n' + '='.repeat(50));
+    // Final stats
+    console.log('\n' + '='.repeat(50));
     console.log('📈 FINAL STATS:');
     console.log(`   Rows scanned: ${totalScanned}`);
     console.log(`   Rows processed: ${totalProcessed}`);
@@ -1203,5 +1191,5 @@ async function extractWithRetry(item, browser) {
     console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
     console.log('🏁 Complete.');
     process.exit(0);
-}) ();
+})();
 
