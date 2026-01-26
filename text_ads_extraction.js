@@ -10,7 +10,6 @@
  *   Column C: App Link
  *   Column D: App Name
  *   Column E: App Headline
- *   Column M: Timestamp
  */
 
 // EXACT IMPORTS FROM app_data_agent.js
@@ -277,10 +276,6 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
         // Write app subtitle/headline to Column E
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!E${rowNum}`, values: [[appSubtitleValue]] });
-
-        // Write Timestamp to Column M (Pakistan Time)
-        const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
-        data.push({ range: `${ESCAPED_SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
     });
 
     if (data.length === 0) return;
