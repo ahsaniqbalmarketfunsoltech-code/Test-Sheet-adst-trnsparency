@@ -65,25 +65,28 @@ function cleanValue(value) {
     return cleaned;
 }
 
-function isValidAppLink(appLink) {
-    if (!appLink) return false;
+function needsProcessing(appLink) {
+    // Returns TRUE if App Link is NOT_FOUND (needs to be processed by your agent)
+    if (!appLink) return true; // Empty = needs processing
+    
     const link = appLink.trim().toUpperCase();
     
-    // Exclude NOT_FOUND, BLOCKED, ERROR, SKIP, empty values
-    const invalidValues = ['NOT_FOUND', 'BLOCKED', 'ERROR', 'SKIP', 'N/A', 'NA', ''];
-    if (invalidValues.includes(link)) return false;
+    // These values mean the row needs processing
+    const needsWork = ['NOT_FOUND', 'NOT FOUND', ''];
+    if (needsWork.includes(link)) return true;
     
-    // Should contain a valid URL pattern (play.google.com, itunes.apple.com, etc.)
-    const validPatterns = [
+    // If it has a valid URL, it's already processed - skip it
+    const lowerLink = appLink.toLowerCase();
+    const hasValidLink = [
         'play.google.com',
         'itunes.apple.com',
         'apps.apple.com',
         'http',
         'https'
-    ];
+    ].some(pattern => lowerLink.includes(pattern));
     
-    const lowerLink = appLink.toLowerCase();
-    return validPatterns.some(pattern => lowerLink.includes(pattern));
+    // Return true only if NO valid link (needs processing)
+    return !hasValidLink;
 }
 
 function createRowKey(row) {
@@ -196,15 +199,15 @@ async function fetchFromSingleTab(sheets, spreadsheetId, sourceName, tabName) {
                 
                 if (rows.length === 0) break;
                 
-                // Filter rows with valid App Links
+                // Filter rows where App Link is NOT_FOUND (needs processing)
                 for (const row of rows) {
                     const appLink = row[2] || ''; // Column C
                     
-                    if (isValidAppLink(appLink)) {
+                    if (needsProcessing(appLink)) {
                         validRows.push({
                             advertiserName: cleanValue(row[0] || ''),
                             adsUrl: cleanValue(row[1] || ''),
-                            appLink: cleanValue(row[2] || ''),
+                            appLink: cleanValue(row[2] || 'NOT_FOUND'),
                             appName: cleanValue(row[3] || ''),
                             videoId: cleanValue(row[4] || ''),
                             sourceSheet: `${sourceName} [${tabName}]`,
