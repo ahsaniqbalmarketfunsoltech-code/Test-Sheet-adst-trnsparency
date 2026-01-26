@@ -1,6 +1,4 @@
 {
-    "description": "Source Google Sheets to aggregate data from",
-    "instructions": "Add your Google Sheet IDs below. Use 'sheetName' for single tab OR 'sheetNames' array for multiple tabs. Each tab should have: Column A=Advertiser Name, B=Ads URL, C=App Link, D=App Name, E=Video ID",
     "sheets": [
         {
             "id": "1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0",
@@ -10,7 +8,7 @@
         {
             "id": "1bhHZl4NOOJsLClB0fESpmBuySg0tlVHtKQTw0OVjHS4",
             "name": "Ads Transparency(Hafiz) P1",
-            "sheetNames": "Ads Transparency(Hafiz) P1"
+            "sheetName": "Test data"
         },
         {
             "id": "1o6jnwxi0JoiACQJ3AqK-1YCrHw5uQJ9Og63yoQ9SJ3c",
