@@ -92,159 +92,89 @@ async function getGoogleSheetsClient() {
     return google.sheets({ version: 'v4', auth: authClient });
 }
 
-async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
-    const toProcess = [];
+// OPTIMIZED: Stream batch size for reading (smaller = faster start, less memory)
+const STREAM_BATCH_SIZE = parseInt(process.env.STREAM_BATCH_SIZE) || 500;
 
-    // First, get the total number of rows using sheet metadata (supports 40,000+ rows)
-    // Then scan ALL rows from TOP to BOTTOM
-    console.log(`📊 Finding total rows and scanning ALL data from TOP to BOTTOM in batches of ${batchSize} rows...`);
-
-    // Get the actual total row count using sheet metadata (supports 40,000+ rows)
-    let totalRows = 0;
-    let metadataRowCount = 0;
+// Get total row count quickly (just metadata, no data scan)
+async function getTotalRowCount(sheets) {
     try {
-        // Use spreadsheet metadata to get actual row count
         const sheetMetadata = await sheets.spreadsheets.get({
             spreadsheetId: SPREADSHEET_ID,
             ranges: [`${ESCAPED_SHEET_NAME}`],
             fields: 'sheets.properties.gridProperties.rowCount'
         });
-
-        // Get the row count from metadata - this is our PRIMARY source of truth
         const sheetProps = sheetMetadata.data.sheets?.[0]?.properties?.gridProperties;
-        if (sheetProps && sheetProps.rowCount) {
-            metadataRowCount = sheetProps.rowCount;
-            console.log(`  ✓ Sheet metadata indicates ${metadataRowCount} total rows`);
-        }
-
-        // Use metadata row count as primary, but try to find last row with actual data
-        // by checking column B (URL column) from bottom up in chunks
-        // This handles cases where metadata rowCount includes empty rows
-        if (metadataRowCount > 0) {
-            totalRows = metadataRowCount;
-
-            // Try to find the actual last row with data by checking from bottom
-            // Check in reverse chunks of 1000 to find where data ends
-            let foundLastDataRow = false;
-            let checkEnd = metadataRowCount;
-
-            while (!foundLastDataRow && checkEnd > 1) {
-                const checkStart = Math.max(2, checkEnd - 1000);
-                try {
-                    const checkResponse = await sheets.spreadsheets.values.get({
-                        spreadsheetId: SPREADSHEET_ID,
-                        range: `${ESCAPED_SHEET_NAME}!B${checkStart}:B${checkEnd}`,
-                    });
-                    const checkRows = checkResponse.data.values || [];
-
-                    // Find last non-empty row in this chunk
-                    for (let i = checkRows.length - 1; i >= 0; i--) {
-                        const cell = checkRows[i]?.[0]?.trim();
-                        if (cell && cell.length > 0) {
-                            totalRows = checkStart + i;
-                            foundLastDataRow = true;
-                            console.log(`  ✓ Found actual last data row: ${totalRows}`);
-                            break;
-                        }
-                    }
-
-                    if (!foundLastDataRow) {
-                        checkEnd = checkStart - 1;
-                    }
-                } catch (e) {
-                    // If error, assume this chunk has data and use metadata count
-                    foundLastDataRow = true;
-                }
-            }
-        }
-
-        console.log(`  ✓ Will scan ${totalRows} rows from TOP (row 2) to BOTTOM (row ${totalRows})`);
+        return sheetProps?.rowCount || 0;
     } catch (error) {
-        console.error(`  ⚠️ Error finding total rows: ${error.message}`);
-        // Fallback: try to get rows in batches from a large assumed number
-        totalRows = 100000; // Assume large number, will stop when no more data
+        console.error(`  ⚠️ Error getting row count: ${error.message}`);
+        return 1000000; // Fallback to large number
     }
+}
 
-    if (totalRows <= 1) {
-        console.log(`📊 No data rows found\n`);
-        return toProcess;
-    }
+// OPTIMIZED: Get next batch of unprocessed rows (streaming approach)
+// Returns { rows: [...], nextStartRow: number, hasMore: boolean }
+async function getNextBatch(sheets, startRow, batchSize = STREAM_BATCH_SIZE) {
+    const toProcess = [];
 
-    // Process from TOP to BOTTOM in batches
-    let startRow = 2; // Start from row 2 (skip header)
-    let hasMoreData = true;
-    let totalProcessed = 0;
+    try {
+        const range = `${ESCAPED_SHEET_NAME}!A${startRow}:E${startRow + batchSize - 1}`;
 
-    while (hasMoreData && startRow <= totalRows) {
-        try {
-            // Calculate end row for this batch (working forwards)
-            const endRow = Math.min(totalRows, startRow + batchSize - 1);
-            const range = `${ESCAPED_SHEET_NAME}!A${startRow}:E${endRow}`;
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: range,
+        });
 
-            const response = await sheets.spreadsheets.values.get({
-                spreadsheetId: SPREADSHEET_ID,
-                range: range,
-            });
+        const rows = response.data.values || [];
 
-            const rows = response.data.values || [];
-
-            if (rows.length === 0) {
-                hasMoreData = false;
-                break;
-            }
-
-            // Process rows in order (from top to bottom within this batch)
-            for (let i = 0; i < rows.length; i++) {
-                const row = rows[i];
-                const actualRowIndex = startRow + i - 1; // Actual row number in sheet (0-indexed from startRow)
-                const url = row[1]?.trim() || '';
-                const storeLink = row[2]?.trim() || '';
-                const appName = row[3]?.trim() || '';
-                const appSubtitle = row[4]?.trim() || '';
-
-                // Skip if no URL
-                if (!url) continue;
-
-                // Skip rows that already have ANY extracted data in columns C, D, or E
-                // Treat any existing value as processed so we only handle empty rows
-                if (storeLink || appName || appSubtitle) continue;
-
-                // Row has no storeLink - needs processing
-                toProcess.push({
-                    url,
-                    rowIndex: actualRowIndex,
-                    needsMetadata: true,
-                    needsVideoId: false,
-                    existingStoreLink: ''
-                });
-            }
-
-            totalProcessed += rows.length;
-            console.log(`  ✓ Processed ${totalProcessed} rows (from top), found ${toProcess.length} to process`);
-
-            // Move to next batch (going forwards)
-            startRow = endRow + 1;
-
-            // If we've reached beyond totalRows, we're done
-            if (startRow > totalRows) {
-                hasMoreData = false;
-            } else {
-                // Small delay between batches to avoid rate limits
-                await sleep(100);
-            }
-        } catch (error) {
-            console.error(`  ⚠️ Error loading batch starting at row ${startRow}: ${error.message}`);
-            // If error, try to continue with next batch (move forwards)
-            startRow += batchSize;
-            if (startRow > totalRows) {
-                hasMoreData = false;
-            }
-            await sleep(500); // Wait a bit longer on error
+        if (rows.length === 0) {
+            return { rows: [], nextStartRow: startRow, hasMore: false };
         }
-    }
 
-    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing (from top to bottom)\n`);
-    return toProcess;
+        // Filter to only unprocessed rows
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const actualRowIndex = startRow + i - 1; // 0-indexed
+            const url = row[1]?.trim() || '';
+            const storeLink = row[2]?.trim() || '';
+            const appName = row[3]?.trim() || '';
+            const appSubtitle = row[4]?.trim() || '';
+
+            // Skip if no URL
+            if (!url) continue;
+
+            // Skip rows that already have extracted data
+            if (storeLink || appName || appSubtitle) continue;
+
+            toProcess.push({
+                url,
+                rowIndex: actualRowIndex,
+                needsMetadata: true,
+                needsVideoId: false,
+                existingStoreLink: ''
+            });
+        }
+
+        return {
+            rows: toProcess,
+            nextStartRow: startRow + rows.length,
+            hasMore: rows.length === batchSize,
+            scannedCount: rows.length
+        };
+    } catch (error) {
+        console.error(`  ⚠️ Error reading batch at row ${startRow}: ${error.message}`);
+        return {
+            rows: [],
+            nextStartRow: startRow + batchSize,
+            hasMore: true, // Assume more data, try next batch
+            scannedCount: 0
+        };
+    }
+}
+
+// Legacy function for compatibility - now just returns empty (streaming is used instead)
+async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
+    console.log(`📊 Using STREAMING mode - will process rows as they're loaded...`);
+    return []; // Empty - we use streaming now
 }
 
 async function batchWriteToSheet(sheets, updates, retryCount = 0) {
@@ -1085,274 +1015,193 @@ async function extractWithRetry(item, browser) {
     }
     // If we're here, we exhausted retries. Return whatever we have.
     return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', appSubtitle: 'NOT_FOUND' };
-}
+    // ============================================
+    // MAIN EXECUTION - OPTIMIZED STREAMING MODE
+    // ============================================
+    (async () => {
+        console.log(`🤖 Starting Text Ads Extraction Agent (TOP TO BOTTOM - STREAMING)...\n`);
+        console.log(`📋 Sheet: ${SHEET_NAME}`);
+        console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Headline`);
+        console.log(`🚀 Mode: STREAMING (processes immediately, minimal memory)\n`);
 
-// ============================================
-// MAIN EXECUTION
-// ============================================
-(async () => {
-    console.log(`🤖 Starting App Name Extraction Agent (TOP TO BOTTOM)...\n`);
-    console.log(`📋 Sheet: ${SHEET_NAME}`);
-    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Headline\n`);
+        const sessionStartTime = Date.now();
+        const MAX_RUNTIME = 330 * 60 * 1000; // 5.5 hours
 
-    const sessionStartTime = Date.now();
-    const MAX_RUNTIME = 330 * 60 * 1000;
+        const sheets = await getGoogleSheetsClient();
 
-    const sheets = await getGoogleSheetsClient();
-    const toProcess = await getUrlData(sheets);
+        // Get total row count quickly (just metadata call)
+        const totalRows = await getTotalRowCount(sheets);
+        console.log(`📊 Sheet has ${totalRows} total rows`);
+        console.log(` Starting from row 2, processing to row ${totalRows}\n`);
 
-    if (toProcess.length === 0) {
-        console.log('✨ All rows complete. Nothing to process.');
-        process.exit(0);
-    }
+        console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-    const needsMeta = toProcess.filter(x => x.needsMetadata).length;
-    console.log(`📊 Found ${toProcess.length} rows to process (from top to bottom)\n`);
+        let currentRow = 2; // Start from row 2 (skip header)
+        let totalProcessed = 0;
+        let totalScanned = 0;
+        let totalNotFoundCount = 0;
+        let consecutiveSuccessBatches = 0;
+        let consecutiveEmptyScanIterations = 0;
+        const MAX_EMPTY_SCANS = 10;
+        let rowsQueue = []; // Queue for unprocessed rows found during streaming
 
-    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
-
-    let currentIndex = 0;
-    let consecutiveSuccessBatches = 0;
-    let totalNotFoundCount = 0; // Track NOT_FOUND to detect issues
-
-    while (currentIndex < toProcess.length) {
-        if (Date.now() - sessionStartTime > MAX_RUNTIME) {
-            console.log('\n⏰ Time limit reached. Stopping.');
-            process.exit(0);
-        }
-
-        const remainingCount = toProcess.length - currentIndex;
-        const currentSessionSize = Math.min(PAGES_PER_BROWSER, remainingCount);
-
-        console.log(`\n🏢 Starting New Browser Session (Items ${currentIndex + 1} - ${currentIndex + currentSessionSize})`);
-
-        let launchArgs = [
-            '--autoplay-policy=no-user-gesture-required',
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            // Removed --no-zygote and --single-process - they cause crashes
-            '--disable-software-rasterizer',
-            '--no-first-run',
-            '--disable-extensions',
-            '--disable-background-networking',
-            '--disable-sync',
-            '--disable-translate',
-            '--metrics-recording-only',
-            '--disable-default-apps',
-            '--mute-audio',
-            '--incognito' // Fresh session each time - prevents cookie accumulation
-        ];
-
-        const proxy = pickProxy();
-        if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
-
-        console.log(`  🌐 Browser (proxy: ${proxy || 'DIRECT'})`);
-
-        let browser;
-        try {
-            browser = await puppeteer.launch({
-                headless: 'new',
-                args: launchArgs,
-                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
-            });
-        } catch (launchError) {
-            console.error(`  ❌ Failed to launch browser: ${launchError.message}`);
-            await sleep(5000);
-            try {
-                browser = await puppeteer.launch({ headless: 'new', args: launchArgs });
-            } catch (retryError) {
-                console.error(`  ❌ Failed to launch browser on retry. Exiting.`);
-                process.exit(1);
+        while (currentRow <= totalRows || rowsQueue.length > 0) {
+            if (Date.now() - sessionStartTime > MAX_RUNTIME) {
+                console.log('\n⏰ Time limit reached. Stopping.');
+                break;
             }
-        }
 
-        let sessionProcessed = 0;
-        let blocked = false;
-        // Reset adaptive counter for each browser session
-        consecutiveSuccessBatches = 0;
+            // 🏢 Start a new browser session
+            console.log(`\n🏢 Starting Browser Session (Current Row: ${currentRow}, Queue: ${rowsQueue.length})`);
 
-        // Verify browser is healthy before processing
-        try {
-            const testPage = await browser.newPage();
-            await testPage.close();
-            console.log(`  ✓ Browser healthy`);
-        } catch (healthErr) {
-            console.error(`  ❌ Browser unhealthy: ${healthErr.message}. Restarting...`);
-            try { await browser.close(); } catch (e) { }
-            await sleep(3000);
-            continue; // Restart browser session
-        }
+            let launchArgs = [
+                '--autoplay-policy=no-user-gesture-required',
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--no-first-run',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-sync',
+                '--disable-translate',
+                '--metrics-recording-only',
+                '--disable-default-apps',
+                '--mute-audio',
+                '--incognito'
+            ];
 
-        while (sessionProcessed < currentSessionSize && !blocked) {
-            const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
-            const batch = toProcess.slice(currentIndex, currentIndex + batchSize);
+            const proxy = pickProxy();
+            if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
+            console.log(`  🌐 Proxy: ${proxy || 'DIRECT'}`);
 
-            console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length}`);
-
+            let browser;
             try {
-                // Check if browser is still connected before processing batch
+                browser = await puppeteer.launch({ headless: 'new', args: launchArgs, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null });
+            } catch (e) {
+                console.error(`  ❌ Launch failed: ${e.message}`);
+                await sleep(5000);
+                continue;
+            }
+
+            let sessionProcessed = 0;
+            let blocked = false;
+
+            // Process up to PAGES_PER_BROWSER in this browser context
+            while (sessionProcessed < PAGES_PER_BROWSER && !blocked) {
+                // 1. Refill rowsQueue if it's empty
+                if (rowsQueue.length === 0 && currentRow <= totalRows) {
+                    console.log(`  📥 Scanning next ${STREAM_BATCH_SIZE} rows starting at ${currentRow}...`);
+                    const batchResult = await getNextBatch(sheets, currentRow, STREAM_BATCH_SIZE);
+
+                    totalScanned += (batchResult.scannedCount || 0);
+                    currentRow = batchResult.nextStartRow;
+                    rowsQueue = batchResult.rows;
+
+                    if (rowsQueue.length === 0) {
+                        if (!batchResult.hasMore) {
+                            consecutiveEmptyScanIterations++;
+                            if (consecutiveEmptyScanIterations >= MAX_EMPTY_SCANS) {
+                                console.log(`  ✨ Reached end of data.`);
+                                break;
+                            }
+                        }
+                        console.log(`  ⏭️ No work found in this chunk, scanning next...`);
+                        continue;
+                    }
+                    consecutiveEmptyScanIterations = 0;
+                    console.log(`  ✓ Found ${rowsQueue.length} unprocessed rows in this chunk.`);
+                }
+
+                // If we have nothing left to do and queue is still empty
+                if (rowsQueue.length === 0) break;
+
+                // 2. Take a batch from the queue to process concurrently
+                const batchToProcess = rowsQueue.splice(0, Math.min(CONCURRENT_PAGES, rowsQueue.length));
+                console.log(`📦 Processing batch of ${batchToProcess.length} rows (${rowsQueue.length} remaining in queue)...`);
+
                 if (!browser.isConnected()) {
-                    console.log(`  ⚠️ Browser disconnected. Restarting session...`);
+                    console.log(`  ⚠️ Browser disconnected.`);
                     blocked = true;
                     break;
                 }
 
-                // Process pages sequentially to avoid browser overload
+                // 3. Extract data for these rows
                 const results = [];
-                for (let index = 0; index < batch.length; index++) {
-                    const item = batch[index];
-
-                    // Add random delay before starting each page (staggered)
-                    if (index > 0) {
-                        const staggerDelay = PAGE_LOAD_DELAY_MIN + Math.random() * (PAGE_LOAD_DELAY_MAX - PAGE_LOAD_DELAY_MIN);
-                        await sleep(staggerDelay);
-                    }
+                for (let i = 0; i < batchToProcess.length; i++) {
+                    const item = batchToProcess[i];
+                    if (i > 0) await sleep(PAGE_LOAD_DELAY_MIN + Math.random() * 1000);
 
                     try {
                         const data = await extractWithRetry(item, browser);
-                        results.push({
-                            rowIndex: item.rowIndex,
-                            advertiserName: data.advertiserName,
-                            storeLink: data.storeLink,
-                            appName: data.appName,
-                            appSubtitle: data.appSubtitle
-                        });
-                    } catch (itemErr) {
-                        console.error(`  ❌ Item ${item.rowIndex + 1} error: ${itemErr.message}`);
-                        results.push({
-                            rowIndex: item.rowIndex,
-                            advertiserName: 'ERROR',
-                            storeLink: 'ERROR',
-                            appName: 'ERROR',
-                            appSubtitle: 'ERROR'
-                        });
-
-                        // If we get a protocol error, browser is dead
-                        if (itemErr.message.includes('Protocol error') || itemErr.message.includes('Target closed')) {
-                            console.log(`  ⚠️ Browser crashed. Restarting session...`);
-                            blocked = true;
-                            break;
-                        }
+                        results.push({ ...data, rowIndex: item.rowIndex });
+                    } catch (err) {
+                        console.error(`  ❌ Row ${item.rowIndex + 1} error: ${err.message}`);
+                        results.push({ rowIndex: item.rowIndex, advertiserName: 'ERROR', storeLink: 'ERROR', appName: 'ERROR', appSubtitle: 'ERROR' });
                     }
                 }
 
-                if (blocked) {
-                    // Still write whatever results we got before the crash
-                    if (results.length > 0) {
-                        await batchWriteToSheet(sheets, results);
-                        currentIndex += results.length;
-                        sessionProcessed += results.length;
-                    }
-                    break;
-                }
+                // 4. Log and Write results
+                results.forEach(r => console.log(`  → Row ${r.rowIndex + 1}: ${r.appName} | ${r.appSubtitle?.substring(0, 30)}...`));
 
-                results.forEach(r => {
-                    console.log(`  → Row ${r.rowIndex + 1}: Name=${r.appName} | Subtitle=${r.appSubtitle?.substring(0, 30) || 'NOT_FOUND'}... | Link=${r.storeLink?.substring(0, 40) || 'NOT_FOUND'}`);
-                });
-
-                // Separate results by status for logging and handling
-                const successfulResults = results.filter(r =>
-                    r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED' &&
-                    r.storeLink !== 'NOT_FOUND' && r.appName !== 'NOT_FOUND' &&
-                    r.storeLink !== 'ERROR' && r.appName !== 'ERROR'
-                );
-                const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
-                const notFoundResults = results.filter(r =>
-                    (r.storeLink === 'NOT_FOUND' && r.appName === 'NOT_FOUND') &&
-                    r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED'
-                );
-
-                // Track NOT_FOUND for potential issues
-                totalNotFoundCount += notFoundResults.length;
-
-                // If too many NOT_FOUND in a row, browser might be stale - force rotation
-                if (notFoundResults.length >= batchSize * 0.8) {
-                    console.log(`  ⚠️ High NOT_FOUND rate (${notFoundResults.length}/${batchSize}). Browser may be stale, rotating...`);
-                    blocked = true; // Force browser rotation
-                }
-
-                // WRITE ALL RESULTS TO SHEET (including blocked/not_found)
-                // This ensures processed rows get marked and won't be reprocessed
                 if (results.length > 0) {
                     await batchWriteToSheet(sheets, results);
-                    console.log(`  ✅ Wrote ${results.length} results (${successfulResults.length} success, ${notFoundResults.length} not_found, ${blockedResults.length} blocked)`);
+                    totalProcessed += results.length;
+                    sessionProcessed += results.length;
 
-                    // Add cooldown after each write to prevent rate limits
-                    await sleep(2000 + Math.random() * 2000); // 2-4 second cooldown
-                }
+                    const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
+                    if (blockedResults.length > 0) {
+                        console.log(`  🛑 Block detected. Rotating browser...`);
+                        blocked = true;
+                    }
 
-                // Progress status every 10 batches
-                if ((currentIndex / batchSize) % 10 === 0) {
+                    const progress = Math.round((currentRow / totalRows) * 100);
                     const elapsed = Math.floor((Date.now() - sessionStartTime) / 60000);
-                    const remaining = toProcess.length - currentIndex;
-                    console.log(`\n📊 PROGRESS: ${currentIndex}/${toProcess.length} processed (${remaining} remaining) | Runtime: ${elapsed} mins\n`);
+                    console.log(`  ✅ Wrote results. Progress: ~${progress}% | Runtime: ${elapsed}m\n`);
                 }
 
-                // If any results were blocked, mark for browser rotation
-                if (blockedResults.length > 0) {
-                    console.log(`  🛑 Block detected (${blockedResults.length} blocked, ${successfulResults.length} successful). Closing browser and rotating...`);
-                    proxyStats.totalBlocks++;
-                    proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
-                    blocked = true;
-                    consecutiveSuccessBatches = 0; // Reset on block
-                } else {
-                    consecutiveSuccessBatches++; // Track successful batches
-                }
-
-                // Update index for all processed items (both successful and blocked)
-                currentIndex += batchSize;
-                sessionProcessed += batchSize;
-            } catch (err) {
-                console.error(`  ❌ Batch error: ${err.message}`);
-                currentIndex += batchSize;
-                sessionProcessed += batchSize;
+                if (!blocked) await sleep(BATCH_DELAY_MIN + Math.random() * 2000);
             }
 
-            if (!blocked) {
-                // Conservative adaptive delay - don't reduce below 90% to maintain reliability
-                const adaptiveMultiplier = Math.max(0.9, 1 - (consecutiveSuccessBatches * 0.02)); // Reduce delay by 2% per successful batch, min 90%
-                const adjustedMin = BATCH_DELAY_MIN * adaptiveMultiplier;
-                const adjustedMax = BATCH_DELAY_MAX * adaptiveMultiplier;
-                const batchDelay = adjustedMin + Math.random() * (adjustedMax - adjustedMin);
-                console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s... (adaptive: ${Math.round(adaptiveMultiplier * 100)}%)`);
-                await sleep(batchDelay);
-            }
+            try { await browser.close(); } catch (e) { }
+            if (blocked) await sleep(PROXY_RETRY_DELAY_MIN + Math.random() * 10000);
         }
-
-        // Properly close browser and clear resources
+        // Close browser
         try {
             const pages = await browser.pages();
             for (const p of pages) {
                 try { await p.close(); } catch (e) { }
             }
             await browser.close();
-            await sleep(3000); // Longer cooldown between browser sessions
+            await sleep(2000);
         } catch (e) {
             console.log(`  ⚠️ Browser close error: ${e.message}`);
         }
 
-        // Force garbage collection if available (helps with memory in long runs)
+        // GC if available
         if (global.gc) {
             try { global.gc(); } catch (e) { }
         }
 
+        // Block cooldown
         if (blocked) {
             const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
-            console.log(`  ⏳ Block wait: ${Math.round(wait / 1000)}s...`);
+            console.log(`  ⏳ Block cooldown: ${Math.round(wait / 1000)}s...`);
             await sleep(wait);
         }
     }
 
-    const remaining = await getUrlData(sheets);
-    if (remaining.length > 0) {
-        console.log(`📈 ${remaining.length} rows remaining for next scheduled run.`);
-    }
-
+        // Final stats
+        console.log('\n' + '='.repeat(50));
+    console.log('📈 FINAL STATS:');
+    console.log(`   Rows scanned: ${totalScanned}`);
+    console.log(`   Rows processed: ${totalProcessed}`);
+    console.log(`   NOT_FOUND count: ${totalNotFoundCount}`);
+    console.log(`   Last row reached: ${currentRow}`);
     console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
-    console.log(`📊 Total NOT_FOUND: ${totalNotFoundCount}`);
-    console.log('\n🏁 Complete.');
+    console.log('🏁 Complete.');
     process.exit(0);
-})();
+}) ();
+
