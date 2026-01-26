@@ -1,0 +1,58 @@
+name: Data Aggregator - Twice Daily
+
+on:
+  schedule:
+    # Runs twice daily: 6 AM and 6 PM Pakistan Time (UTC+5)
+    # 6 AM PKT = 1:00 AM UTC
+    # 6 PM PKT = 1:00 PM UTC
+    - cron: '0 1 * * *'   # 6:00 AM PKT
+    - cron: '0 13 * * *'  # 6:00 PM PKT
+  
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual run'
+        required: false
+        default: 'Manual trigger'
+
+jobs:
+  aggregate-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔐 Setup credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: 📊 Setup source sheets config
+        run: |
+          if [ -n "${{ secrets.SOURCE_SHEETS_CONFIG }}" ]; then
+            echo '${{ secrets.SOURCE_SHEETS_CONFIG }}' > source_sheets.json
+          fi
+
+      - name: 🚀 Run Data Aggregator
+        run: node data_aggregator.js
+        env:
+          NODE_ENV: production
+
+      - name: 📝 Log completion
+        run: |
+          echo "✅ Data aggregation completed at $(date)"
+          echo "Trigger: ${{ github.event_name }}"
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Reason: ${{ github.event.inputs.reason }}"
+          fi
