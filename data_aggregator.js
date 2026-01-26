@@ -369,7 +369,44 @@ async function getExistingKeys(sheets) {
 }
 
 // ============================================
-// WRITE TO MASTER SHEET (APPENDS BELOW HEADER - NEVER TOUCHES ROW 1)
+// CREATE NEW TAB WITH HEADER
+// ============================================
+async function createNewTab(sheets, tabName) {
+    const escapedTabName = tabName.includes(' ') ? `'${tabName}'` : tabName;
+    
+    try {
+        // Create the new tab
+        await sheets.spreadsheets.batchUpdate({
+            spreadsheetId: MASTER_SHEET_ID,
+            resource: {
+                requests: [{
+                    addSheet: {
+                        properties: { title: tabName }
+                    }
+                }]
+            }
+        });
+        
+        // Add header row
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: MASTER_SHEET_ID,
+            range: `${escapedTabName}!A1:E1`,
+            valueInputOption: 'RAW',
+            resource: {
+                values: [['Advitiser Name', 'Ads URL', 'App Link', 'App Name', 'Video ID']]
+            }
+        });
+        
+        console.log(`   ✅ Created new tab: ${tabName}`);
+        return true;
+    } catch (error) {
+        console.error(`   ❌ Error creating tab ${tabName}: ${error.message}`);
+        return false;
+    }
+}
+
+// ============================================
+// WRITE TO MASTER SHEET (SINGLE TAB - ALL DATA)
 // ============================================
 async function writeToMasterSheet(sheets, newRows) {
     if (newRows.length === 0) {
@@ -381,63 +418,39 @@ async function writeToMasterSheet(sheets, newRows) {
     
     console.log(`\n📝 Writing ${newRows.length} new rows to master sheet...`);
     console.log(`   ⚠️ Header row (Row 1) will NOT be modified`);
+    console.log(`   📊 Writing ALL data to single tab: ${MASTER_SHEET_NAME}`);
+    
+    // Convert to array format for sheets API
+    const values = newRows.map(row => [
+        row.advertiserName,
+        row.adsUrl,
+        row.appLink,
+        row.appName,
+        row.videoId
+    ]);
     
     try {
-        // First, find the last row with data to append after it
-        let lastRow = 1; // Start after header (row 1)
-        try {
-            const metadata = await sheets.spreadsheets.get({
-                spreadsheetId: MASTER_SHEET_ID,
-                ranges: [escapedSheetName],
-                fields: 'sheets.properties.gridProperties.rowCount'
-            });
-            const totalRows = metadata.data.sheets?.[0]?.properties?.gridProperties?.rowCount || 1;
-            
-            // Check for actual data in column A to find real last row
-            const checkRange = `${escapedSheetName}!A1:A${Math.min(totalRows, 100000)}`;
-            const checkResponse = await sheets.spreadsheets.values.get({
-                spreadsheetId: MASTER_SHEET_ID,
-                range: checkRange,
-            });
-            const existingData = checkResponse.data.values || [];
-            lastRow = existingData.length; // This gives us the last row with data
-            
-            console.log(`   📊 Current data ends at row ${lastRow}, will append starting from row ${lastRow + 1}`);
-        } catch (e) {
-            console.log(`   ⚠️ Could not determine last row, using append mode`);
-        }
-        
-        // Convert to array format for sheets API
-        const values = newRows.map(row => [
-            row.advertiserName,
-            row.adsUrl,
-            row.appLink,
-            row.appName,
-            row.videoId
-        ]);
-        
-        // Write in batches - APPEND mode automatically adds after last row
+        // Write in batches
         for (let i = 0; i < values.length; i += WRITE_BATCH_SIZE) {
             const batch = values.slice(i, i + WRITE_BATCH_SIZE);
             
-            // Use append which NEVER overwrites existing data including header
             await sheets.spreadsheets.values.append({
                 spreadsheetId: MASTER_SHEET_ID,
-                range: `${escapedSheetName}!A2:E`, // Start from A2 to explicitly skip header
+                range: `${escapedSheetName}!A2:E`,
                 valueInputOption: 'RAW',
-                insertDataOption: 'INSERT_ROWS', // Inserts new rows, doesn't overwrite
+                insertDataOption: 'INSERT_ROWS',
                 resource: { values: batch }
             });
             
-            console.log(`   ✅ Wrote batch ${i + 1} - ${Math.min(i + WRITE_BATCH_SIZE, values.length)}`);
+            const batchEnd = Math.min(i + WRITE_BATCH_SIZE, values.length);
+            console.log(`   ✅ Wrote batch ${i + 1} - ${batchEnd}`);
             
-            // Delay between batches
             if (i + WRITE_BATCH_SIZE < values.length) {
                 await sleep(500);
             }
         }
         
-        console.log(`   ✅ Successfully wrote all ${newRows.length} rows (header preserved)`);
+        console.log(`\n   ✅ Successfully wrote all ${newRows.length} rows to ${MASTER_SHEET_NAME}`);
         
     } catch (error) {
         console.error(`   ❌ Error writing to master sheet: ${error.message}`);
