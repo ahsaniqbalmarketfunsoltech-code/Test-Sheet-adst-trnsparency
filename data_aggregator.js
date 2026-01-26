@@ -420,13 +420,11 @@ async function writeToMasterSheet(sheets, newRows) {
     console.log(`   ⚠️ Header row (Row 1) will NOT be modified`);
     console.log(`   📊 Writing ALL data to single tab: ${MASTER_SHEET_NAME}`);
     
-    // Convert to array format for sheets API
+    // Convert to array format for sheets API - ONLY 3 COLUMNS: A, B, C
     const values = newRows.map(row => [
         row.advertiserName,
         row.adsUrl,
-        row.appLink,
-        row.appName,
-        row.videoId
+        row.appLink
     ]);
     
     try {
@@ -436,7 +434,7 @@ async function writeToMasterSheet(sheets, newRows) {
             
             await sheets.spreadsheets.values.append({
                 spreadsheetId: MASTER_SHEET_ID,
-                range: `${escapedSheetName}!A2:E`,
+                range: `${escapedSheetName}!A2:C`,
                 valueInputOption: 'RAW',
                 insertDataOption: 'INSERT_ROWS',
                 resource: { values: batch }

@@ -1,4 +1,6 @@
 {
+    "description": "Source Google Sheets to aggregate data from",
+    "instructions": "Add your Google Sheet IDs below. Use 'sheetName' for single tab OR 'sheetNames' array for multiple tabs. Each tab should have: Column A=Advertiser Name, B=Ads URL, C=App Link, D=App Name, E=Video ID",
     "sheets": [
         {
             "id": "1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0",
