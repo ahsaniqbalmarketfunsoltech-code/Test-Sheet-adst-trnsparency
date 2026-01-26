@@ -71,6 +71,9 @@ function needsProcessing(appLink) {
     
     const link = appLink.trim().toUpperCase();
     
+    // Skip ERROR rows - they have issues, don't collect them
+    if (link === 'ERROR' || link === 'BLOCKED' || link === 'SKIP') return false;
+    
     // These values mean the row needs processing
     const needsWork = ['NOT_FOUND', 'NOT FOUND', ''];
     if (needsWork.includes(link)) return true;
@@ -87,6 +90,17 @@ function needsProcessing(appLink) {
     
     // Return true only if NO valid link (needs processing)
     return !hasValidLink;
+}
+
+function isValidRow(row) {
+    // Skip rows where advertiser name or ads URL is ERROR/empty
+    const advertiserName = (row[0] || '').trim().toUpperCase();
+    const adsUrl = (row[1] || '').trim().toUpperCase();
+    
+    if (advertiserName === 'ERROR' || advertiserName === '') return false;
+    if (adsUrl === 'ERROR' || adsUrl === '') return false;
+    
+    return true;
 }
 
 function createRowKey(row) {
@@ -155,7 +169,9 @@ async function fetchFromSourceSheet(sheets, sheetConfig) {
 }
 
 async function fetchFromSingleTab(sheets, spreadsheetId, sourceName, tabName) {
-    const escapedTabName = tabName.includes(' ') ? `'${tabName}'` : tabName;
+    // Escape tab names with spaces, parentheses, or other special characters
+    const needsQuotes = /[\s\(\)\-\'\"\!\@\#\$\%\^\&\*]/.test(tabName);
+    const escapedTabName = needsQuotes ? `'${tabName}'` : tabName;
     const validRows = [];
     
     console.log(`   📑 Reading tab: ${tabName}`);
@@ -200,8 +216,12 @@ async function fetchFromSingleTab(sheets, spreadsheetId, sourceName, tabName) {
                 if (rows.length === 0) break;
                 
                 // Filter rows where App Link is NOT_FOUND (needs processing)
+                // Also skip rows with ERROR values
                 for (const row of rows) {
                     const appLink = row[2] || ''; // Column C
+                    
+                    // Skip invalid rows (ERROR, empty advertiser/URL)
+                    if (!isValidRow(row)) continue;
                     
                     if (needsProcessing(appLink)) {
                         validRows.push({
@@ -209,9 +229,7 @@ async function fetchFromSingleTab(sheets, spreadsheetId, sourceName, tabName) {
                             adsUrl: cleanValue(row[1] || ''),
                             appLink: cleanValue(row[2] || 'NOT_FOUND'),
                             appName: cleanValue(row[3] || ''),
-                            videoId: cleanValue(row[4] || ''),
-                            sourceSheet: `${sourceName} [${tabName}]`,
-                            dateAdded: getPakistanTime()
+                            videoId: cleanValue(row[4] || '')
                         });
                     }
                 }
