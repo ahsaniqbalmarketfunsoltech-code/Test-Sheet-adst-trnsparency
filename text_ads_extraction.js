@@ -334,13 +334,13 @@ async function extractVisibleTextData(target) {
             mediumText: []
         };
 
-        // Blacklist Google UI elements
-        const blacklistTexts = [
-            'sign in', 'faqs', 'all topics', 'keyboard_arrow_right', 'keyboard_arrow_left',
-            'ad details', 'google ads transparency', 'transparency center', 'about this ad',
-            'home', 'see more ads', 'report this ad', 'shown anywhere', 'arrow_right',
-            'arrow_left', 'navigate_next', 'navigate_before', 'more_vert', 'menu',
-            'the information about this ad'
+        // Blacklist EXACT Google UI text only (not partial matches!)
+        const blacklistExact = [
+            'sign in', 'faqs', 'keyboard_arrow_right', 'keyboard_arrow_left',
+            'google ads transparency center', 'transparency center',
+            'see more ads by this advertiser', 'report this ad',
+            'arrow_right', 'arrow_left', 'navigate_next', 'navigate_before',
+            'more_vert', 'menu', 'google play', 'app store'
         ];
 
         function isVisible(element) {
@@ -370,9 +370,9 @@ async function extractVisibleTextData(target) {
 
             if (!text || text.length < 2) continue;
 
-            // Filter out blacklisted UI text
+            // Filter out ONLY exact blacklisted text (not partial matches!)
             const lowerText = text.toLowerCase();
-            if (blacklistTexts.some(b => lowerText === b || lowerText.includes(b))) continue;
+            if (blacklistExact.some(b => lowerText === b)) continue;
             if (processedTexts.has(text)) continue;
             processedTexts.add(text);
 
