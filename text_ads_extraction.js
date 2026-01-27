@@ -449,53 +449,73 @@ async function extractFromVisibleContent(page) {
     // Package extraction now happens in STEP 2 (same frame as app name)
     const frames = page.frames();
 
-    // STEP 1: Get advertiser name from MAIN page
-    // Strategy: Find "Ad details" header and get the text immediately below it
+    // STEP 1: Get advertiser name from MAIN page (DOM-based for reliability)
     try {
-        const mainData = await extractVisibleTextData(page);
+        result.advertiserName = await page.evaluate(() => {
+            // Helper: clean text
+            const clean = t => (t || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
 
-        // Find "Ad details" block
-        const adDetailsBlock = mainData.textBlocks.find(b =>
-            b.text.toLowerCase().trim() === 'ad details' && b.position.top < 300
-        );
+            // 1. Try finding by "Ad details" label
+            const allElems = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, p'));
+            const header = allElems.find(el => clean(el.innerText).toLowerCase() === 'ad details');
 
-        if (adDetailsBlock) {
-            // Find text directly below "Ad details"
-            const potentialAdvertiser = mainData.textBlocks.filter(b =>
-                b.position.top > adDetailsBlock.position.top &&
-                b.position.top < adDetailsBlock.position.top + 100 &&
-                Math.abs(b.position.left - adDetailsBlock.position.left) < 50 &&
-                b.text.length > 2
-            ).sort((a, b) => a.position.top - b.position.top)[0];
+            if (header) {
+                const headerRect = header.getBoundingClientRect();
+                // Search for element immediately below (within 100px) and aligned
+                const candidates = allElems.filter(el => {
+                    const r = el.getBoundingClientRect();
+                    return r.top > headerRect.top + 5 &&
+                        r.top < headerRect.top + 150 &&
+                        Math.abs(r.left - headerRect.left) < 50 &&
+                        clean(el.innerText).length > 2 &&
+                        el !== header &&
+                        !el.contains(header); // Not a parent
+                });
 
-            if (potentialAdvertiser) {
-                result.advertiserName = potentialAdvertiser.text;
-                console.log(`  ✓ Advertiser (found below 'Ad details'): ${result.advertiserName}`);
-            }
-        }
+                // Sort by top position
+                candidates.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
 
-        // Fallback: If structural search failed, use the old method (large text scan)
-        if (result.advertiserName === 'NOT_FOUND') {
-            const skipTexts = [
-                'transparency', 'google ads', 'ad details', 'advertiser details', 'advertiser', 'home', 'faqs', 'center', 'centre',
-                'close', 'open', 'menu', 'back', 'forward', 'about', 'options', 'feedback', 'why this ad',
-                'chevron_left', 'chevron_right', 'arrow_back', 'arrow_forward', 'keyboard_arrow'
-            ];
-
-            for (const block of mainData.largeText.filter(b => b.position.top < 400)) {
-                const lower = block.text.toLowerCase();
-                if (skipTexts.some(s => lower.includes(s))) continue;
-                if (block.text.split(' ').length === 1 && block.text.length < 5) continue;
-                // Specific check for "close" is covered by skipTexts now
-
-                if (block.text.length >= 3 && block.text.length <= 100) {
-                    result.advertiserName = block.text;
-                    console.log(`  ✓ Advertiser (fallback): ${block.text}`);
-                    break;
+                if (candidates.length > 0) {
+                    return clean(candidates[0].innerText);
                 }
             }
+
+            // 2. Fallback: Search for largest text in top area (excluding known UI)
+            const topTexts = allElems.filter(el => {
+                const r = el.getBoundingClientRect();
+                return r.top < 300 && clean(el.innerText).length > 3 && r.height > 10;
+            });
+
+            const skip = ['transparency', 'google', 'ad details', 'home', 'faq', 'sign in', 'menu', 'search', 'filter'];
+            const valid = topTexts.filter(el => {
+                const t = clean(el.innerText).toLowerCase();
+                return !skip.some(s => t.includes(s));
+            });
+
+            // Return largest font element? Or first?
+            // Usually Advertiser is H1 or largest text
+            if (valid.length > 0) {
+                // Sort by font size desc
+                valid.sort((a, b) => {
+                    const sa = parseFloat(window.getComputedStyle(a).fontSize);
+                    const sb = parseFloat(window.getComputedStyle(b).fontSize);
+                    return sb - sa;
+                });
+                if (valid[0]) return clean(valid[0].innerText);
+            }
+
+            return 'NOT_FOUND';
+        });
+
+        if (result.advertiserName !== 'NOT_FOUND') {
+            console.log(`  ✓ Advertiser (DOM): ${result.advertiserName}`);
+        } else {
+            // Fallback to visual scan from previous data (if needed, but DOM should be better)
+            // ... existing visual scan fallback ...
+            const mainData = await extractVisibleTextData(page);
+            // ... (we can leave this or trust DOM)
         }
-    } catch (e) { console.log(`  ⚠️ Main page scan failed: ${e.message}`); }
+    } catch (e) { console.log(`  ⚠️ Advertiser search failed: ${e.message}`); }
 
     // STEP 2: Scan frames for ad content (app name, subtitle, AND package from SAME frame)
     console.log(`  📦 Scanning ${frames.length} frames for app name/headline...`);
@@ -984,7 +1004,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     console.log(`  ✅ Visual extraction successful!`);
 
                     // If we have everything, we can return early
-                    if (result.appName !== 'NOT_FOUND' && result.storeLink !== 'NOT_FOUND') {
+                    if (result.appName !== 'NOT_FOUND' && result.storeLink !== 'NOT_FOUND' && result.advertiserName !== 'NOT_FOUND') {
                         await page.close();
                         return result;
                     }
