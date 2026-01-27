@@ -9,7 +9,7 @@ on:
       sheet_name:
         description: 'Sheet/Tab name to process'
         required: false
-        default: 'Test'
+        default: 'Text Ads data'
         type: string
 
 jobs:

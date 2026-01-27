@@ -278,7 +278,7 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
 
-       
+
     });
 
     if (data.length === 0) return;
@@ -1128,8 +1128,7 @@ async function extractWithRetry(item, browser) {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--no-zygote',
-            '--single-process',
+            // Removed --no-zygote and --single-process - they cause crashes
             '--disable-software-rasterizer',
             '--no-first-run',
             '--disable-extensions',
