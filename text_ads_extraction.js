@@ -450,29 +450,49 @@ async function extractFromVisibleContent(page) {
     const frames = page.frames();
 
     // STEP 1: Get advertiser name from MAIN page
-    // The advertiser name is usually a company name like "ROUNDS AI LTD" below "Ad details"
+    // Strategy: Find "Ad details" header and get the text immediately below it
     try {
         const mainData = await extractVisibleTextData(page);
-        // Skip UI text and look for actual company names
-        const skipTexts = [
-            'transparency', 'google ads', 'ad details', 'home', 'faqs', 'center', 'centre',
-            'close', 'open', 'menu', 'back', 'forward', 'about', 'options', 'feedback', 'why this ad'
-        ];
 
-        for (const block of mainData.largeText.filter(b => b.position.top < 400)) {
-            const lower = block.text.toLowerCase();
-            // Skip Google UI elements
-            if (skipTexts.some(s => lower.includes(s))) continue;
+        // Find "Ad details" block
+        const adDetailsBlock = mainData.textBlocks.find(b =>
+            b.text.toLowerCase().trim() === 'ad details' && b.position.top < 300
+        );
 
-            // Skip single words/short text that are likely navigation/buttons
-            if (block.text.split(' ').length === 1 && block.text.length < 5) continue;
-            // specific check for "close"
-            if (lower === 'close') continue;
+        if (adDetailsBlock) {
+            // Find text directly below "Ad details"
+            const potentialAdvertiser = mainData.textBlocks.filter(b =>
+                b.position.top > adDetailsBlock.position.top &&
+                b.position.top < adDetailsBlock.position.top + 100 &&
+                Math.abs(b.position.left - adDetailsBlock.position.left) < 50 &&
+                b.text.length > 2
+            ).sort((a, b) => a.position.top - b.position.top)[0];
 
-            if (block.text.length >= 3 && block.text.length <= 100) {
-                result.advertiserName = block.text;
-                console.log(`  ✓ Advertiser (main): ${block.text}`);
-                break;
+            if (potentialAdvertiser) {
+                result.advertiserName = potentialAdvertiser.text;
+                console.log(`  ✓ Advertiser (found below 'Ad details'): ${result.advertiserName}`);
+            }
+        }
+
+        // Fallback: If structural search failed, use the old method (large text scan)
+        if (result.advertiserName === 'NOT_FOUND') {
+            const skipTexts = [
+                'transparency', 'google ads', 'ad details', 'advertiser details', 'advertiser', 'home', 'faqs', 'center', 'centre',
+                'close', 'open', 'menu', 'back', 'forward', 'about', 'options', 'feedback', 'why this ad',
+                'chevron_left', 'chevron_right', 'arrow_back', 'arrow_forward', 'keyboard_arrow'
+            ];
+
+            for (const block of mainData.largeText.filter(b => b.position.top < 400)) {
+                const lower = block.text.toLowerCase();
+                if (skipTexts.some(s => lower.includes(s))) continue;
+                if (block.text.split(' ').length === 1 && block.text.length < 5) continue;
+                // Specific check for "close" is covered by skipTexts now
+
+                if (block.text.length >= 3 && block.text.length <= 100) {
+                    result.advertiserName = block.text;
+                    console.log(`  ✓ Advertiser (fallback): ${block.text}`);
+                    break;
+                }
             }
         }
     } catch (e) { console.log(`  ⚠️ Main page scan failed: ${e.message}`); }
