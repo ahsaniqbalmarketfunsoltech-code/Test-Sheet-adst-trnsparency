@@ -10,7 +10,7 @@
  *   Column C: App Link
  *   Column D: App Name
  *   Column F: App Subtitle/Headline
- *   Column M: Timestamp
+
  */
 
 // EXACT IMPORTS FROM app_data_agent.js
@@ -23,8 +23,8 @@ const fs = require('fs');
 // ============================================
 // CONFIGURATION
 // ============================================
-const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
-const SHEET_NAME = process.env.SHEET_NAME || 'Test'; // Can be overridden via env var
+const SPREADSHEET_ID = '1yq2UwI94lwfYPY86CFwGbBsm3kpdqKrefYgrw3lEAwk';
+const SHEET_NAME = process.env.SHEET_NAME || 'Text Ads data'; // Can be overridden via env var
 // Escape sheet name for use in A1 notation (wrap in single quotes if it contains spaces)
 const ESCAPED_SHEET_NAME = SHEET_NAME.includes(' ') ? `'${SHEET_NAME}'` : SHEET_NAME;
 const CREDENTIALS_PATH = './credentials.json';
@@ -278,9 +278,7 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
         const appSubtitleValue = appSubtitle || 'NOT_FOUND';
         data.push({ range: `${ESCAPED_SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
 
-        // Write Timestamp to Column M (Pakistan Time)
-        const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
-        data.push({ range: `${ESCAPED_SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
+       
     });
 
     if (data.length === 0) return;
