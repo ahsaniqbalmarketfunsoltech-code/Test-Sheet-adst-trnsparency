@@ -23,8 +23,8 @@ const fs = require('fs');
 // ============================================
 // CONFIGURATION
 // ============================================
-const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
-const SHEET_NAME = process.env.SHEET_NAME || 'Test'; // Can be overridden via env var
+const SPREADSHEET_ID = '1yq2UwI94lwfYPY86CFwGbBsm3kpdqKrefYgrw3lEAwk';
+const SHEET_NAME = process.env.SHEET_NAME || 'Text Ads data'; // Can be overridden via env var
 // Escape sheet name for use in A1 notation (wrap in single quotes if it contains spaces)
 const ESCAPED_SHEET_NAME = SHEET_NAME.includes(' ') ? `'${SHEET_NAME}'` : SHEET_NAME;
 const CREDENTIALS_PATH = './credentials.json';
@@ -666,15 +666,15 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         // Only accepts REAL Play Store / App Store links
                         // OR constructs from package name found in DOM
                         // =====================================================
-                        
+
                         // Function to find package name in ANY text/attribute in the DOM
                         const findPackageName = () => {
                             // Package name pattern: com.something.something (at least 2 dots, valid chars)
                             const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
                             const altPackageRegex = /\b([a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
-                            
+
                             const foundPackages = new Set();
-                            
+
                             // 1. Search in ALL href attributes
                             const allLinks = root.querySelectorAll('a[href]');
                             for (const link of allLinks) {
@@ -688,7 +688,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 const matches = href.match(packageRegex);
                                 if (matches) matches.forEach(m => foundPackages.add(m));
                             }
-                            
+
                             // 2. Search in ALL data-* attributes
                             const allElements = root.querySelectorAll('*');
                             for (const el of allElements) {
@@ -704,7 +704,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     }
                                 }
                             }
-                            
+
                             // 3. Search in script tags content
                             const scripts = root.querySelectorAll('script');
                             for (const script of scripts) {
@@ -712,12 +712,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 const matches = content.match(packageRegex);
                                 if (matches) matches.forEach(m => foundPackages.add(m));
                             }
-                            
+
                             // 4. Search in inline styles and other text
                             const html = root.innerHTML || '';
                             const htmlMatches = html.match(packageRegex);
                             if (htmlMatches) htmlMatches.forEach(m => foundPackages.add(m));
-                            
+
                             // Filter out false positives (CSS classes, common patterns)
                             const blacklistPatterns = ['com.google.android', 'com.android.', 'schema.org', 'w3.org'];
                             const validPackages = [...foundPackages].filter(pkg => {
@@ -726,12 +726,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (pkg.split('.').length < 2) return false;
                                 return true;
                             });
-                            
+
                             // Return first valid package (prioritize com.* packages)
                             const comPackages = validPackages.filter(p => p.startsWith('com.'));
                             return comPackages[0] || validPackages[0] || null;
                         };
-                        
+
                         // Build Play Store URL from package name
                         const buildPlayStoreUrl = (packageName) => {
                             if (!packageName) return null;
@@ -773,7 +773,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (playMatch && playMatch[1]) return playMatch[1];
                                 const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
                                 if (appMatch && appMatch[1]) return appMatch[1];
-                                
+
                                 // Try to extract package name from href and build URL
                                 const pkgMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
                                 if (pkgMatch && pkgMatch[1] && pkgMatch[1].includes('.')) {
@@ -815,7 +815,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         // EXTRACTION - Find app name using KDwhZb class (primary)
                         // Then verify with store link selectors
                         // =====================================================
-                        
+
                         // PRIMARY: Use the KDwhZb div class to find app name (contains span with name)
 
                         const appNameDivSelectors = [
@@ -866,7 +866,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             const elements = root.querySelectorAll(selector);
                             for (const el of elements) {
                                 const storeLink = extractStoreLink(el.href);
-                                
+
                                 // If we don't have app name yet, try to get from link text
                                 if (!data.appName) {
                                     const rawName = el.innerText || el.textContent || '';
@@ -875,7 +875,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                         data.appName = appName;
                                     }
                                 }
-                                
+
                                 // If we have both name and link, return immediately
                                 if (data.appName && storeLink) {
                                     return { appName: data.appName, storeLink, appSubtitle: data.appSubtitle, isVideo: true, isHidden: false };
@@ -923,8 +923,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         if (!data.appName) {
                             const textSels = [
                                 'div[class*="KDwhZb"] span',
-                                '[role="heading"]', 
-                                'div[class*="app-name"]', 
+                                '[role="heading"]',
+                                'div[class*="app-name"]',
                                 '.app-title',
                                 // More fallback selectors
                                 '[class*="title"]',
@@ -938,7 +938,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     const rawName = el.innerText || el.textContent || '';
                                     const appName = cleanAppName(rawName);
                                     // Accept any language - just check it's not the advertiser name
-                                    if (appName && appName.toLowerCase() !== blacklist && 
+                                    if (appName && appName.toLowerCase() !== blacklist &&
                                         !appName.toLowerCase().includes('ad details') &&
                                         !appName.toLowerCase().includes('google ads') &&
                                         appName.length > 1) {
@@ -949,7 +949,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (data.appName) break;
                             }
                         }
-                        
+
                         // LAST RESORT: Use subtitle as app name if we have subtitle but no name
                         // (sometimes the app name is only in subtitle position)
 
@@ -992,7 +992,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                 if (data.appSubtitle) break;
                             }
                         }
-                        
+
                         // If we still don't have app name but have subtitle, use part of subtitle
                         if (!data.appName && data.appSubtitle) {
                             // Take first sentence or first 50 chars as potential app name
@@ -1201,20 +1201,20 @@ async function extractWithRetry(item, browser) {
                 });
 
                 // Separate results by status for logging and handling
-                const successfulResults = results.filter(r => 
+                const successfulResults = results.filter(r =>
                     r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED' &&
                     r.storeLink !== 'NOT_FOUND' && r.appName !== 'NOT_FOUND' &&
                     r.storeLink !== 'ERROR' && r.appName !== 'ERROR'
                 );
                 const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
-                const notFoundResults = results.filter(r => 
+                const notFoundResults = results.filter(r =>
                     (r.storeLink === 'NOT_FOUND' && r.appName === 'NOT_FOUND') &&
                     r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED'
                 );
-                
+
                 // Track NOT_FOUND for potential issues
                 totalNotFoundCount += notFoundResults.length;
-                
+
                 // If too many NOT_FOUND in a row, browser might be stale - force rotation
                 if (notFoundResults.length >= batchSize * 0.8) {
                     console.log(`  ⚠️ High NOT_FOUND rate (${notFoundResults.length}/${batchSize}). Browser may be stale, rotating...`);
@@ -1277,10 +1277,10 @@ async function extractWithRetry(item, browser) {
             }
             await browser.close();
             await sleep(3000); // Longer cooldown between browser sessions
-        } catch (e) { 
+        } catch (e) {
             console.log(`  ⚠️ Browser close error: ${e.message}`);
         }
-        
+
         // Force garbage collection if available (helps with memory in long runs)
         if (global.gc) {
             try { global.gc(); } catch (e) { }
