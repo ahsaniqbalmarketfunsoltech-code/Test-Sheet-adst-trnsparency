@@ -423,6 +423,12 @@ async function extractFromVisibleContent(page) {
         appSubtitle: 'NOT_FOUND'
     };
 
+    // Helper: Build Play Store URL from package name
+    const buildPlayStoreUrl = (packageName) => {
+        if (!packageName || !packageName.includes('.')) return null;
+        return `https://play.google.com/store/apps/details?id=${packageName}`;
+    };
+
     // Helper: Clean store link
     const cleanStoreLink = (href) => {
         if (!href || typeof href !== 'string') return null;
@@ -435,10 +441,107 @@ async function extractFromVisibleContent(page) {
         }
         const pkgMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
         if (pkgMatch && pkgMatch[1] && pkgMatch[1].includes('.')) {
-            return `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
+            return buildPlayStoreUrl(pkgMatch[1]);
         }
         return null;
     };
+
+    // STEP 0: Search ENTIRE PAGE HTML for package names (com.xxx.xxx pattern)
+    console.log(`  🔍 Searching HTML for package names...`);
+    try {
+        const packageName = await page.evaluate(() => {
+            const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
+            const foundPackages = new Set();
+
+            // Search all href attributes
+            const allLinks = document.querySelectorAll('a[href]');
+            for (const link of allLinks) {
+                const href = link.href || '';
+                // Direct id= parameter
+                const idMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
+                    foundPackages.add(idMatch[1]);
+                }
+                // Package pattern in URL
+                const matches = href.match(packageRegex);
+                if (matches) matches.forEach(m => foundPackages.add(m));
+            }
+
+            // Search all data-* attributes
+            const allElements = document.querySelectorAll('*');
+            for (const el of allElements) {
+                for (const attr of el.attributes || []) {
+                    const val = attr.value || '';
+                    const matches = val.match(packageRegex);
+                    if (matches) matches.forEach(m => foundPackages.add(m));
+                    const idMatch = val.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
+                    if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
+                        foundPackages.add(idMatch[1]);
+                    }
+                }
+            }
+
+            // Search script tags
+            const scripts = document.querySelectorAll('script');
+            for (const script of scripts) {
+                const content = script.textContent || '';
+                const matches = content.match(packageRegex);
+                if (matches) matches.forEach(m => foundPackages.add(m));
+            }
+
+            // Search entire HTML
+            const html = document.documentElement.innerHTML || '';
+            const htmlMatches = html.match(packageRegex);
+            if (htmlMatches) htmlMatches.forEach(m => foundPackages.add(m));
+
+            // Filter out common false positives
+            const blacklistPatterns = ['com.google.android', 'com.android.', 'schema.org', 'w3.org', 'com.google.ads'];
+            const validPackages = [...foundPackages].filter(pkg => {
+                if (pkg.length < 5 || pkg.length > 100) return false;
+                if (blacklistPatterns.some(bp => pkg.startsWith(bp))) return false;
+                if (pkg.split('.').length < 3) return false;
+                return true;
+            });
+
+            // Prefer packages starting with 'com.'
+            const comPackages = validPackages.filter(p => p.startsWith('com.'));
+            return comPackages[0] || validPackages[0] || null;
+        });
+
+        if (packageName) {
+            result.storeLink = buildPlayStoreUrl(packageName);
+            console.log(`  ✓ Package found in HTML: ${packageName}`);
+            console.log(`  ✓ Store link: ${result.storeLink}`);
+        }
+    } catch (e) { console.log(`  ⚠️ Package search failed: ${e.message}`); }
+
+    // Also search iframes for package names
+    const frames = page.frames();
+    if (result.storeLink === 'NOT_FOUND') {
+        for (const frame of frames) {
+            try {
+                const packageName = await frame.evaluate(() => {
+                    const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
+                    const html = document.documentElement.innerHTML || '';
+                    const matches = html.match(packageRegex);
+                    if (!matches) return null;
+
+                    const blacklist = ['com.google.android', 'com.android.', 'com.google.ads'];
+                    const valid = matches.filter(m =>
+                        m.split('.').length >= 3 &&
+                        !blacklist.some(b => m.startsWith(b))
+                    );
+                    return valid[0] || null;
+                });
+
+                if (packageName) {
+                    result.storeLink = buildPlayStoreUrl(packageName);
+                    console.log(`  ✓ Package found in iframe: ${packageName}`);
+                    break;
+                }
+            } catch (e) { /* frame not accessible */ }
+        }
+    }
 
     // STEP 1: Get advertiser name from MAIN page (it's always there)
     try {
@@ -452,16 +555,15 @@ async function extractFromVisibleContent(page) {
         }
     } catch (e) { console.log(`  ⚠️ Main page scan failed: ${e.message}`); }
 
-    // STEP 2: Scan ALL frames for ad content (app name, link, subtitle)
-    const frames = page.frames();
-    console.log(`  📦 Scanning ${frames.length} frames...`);
+    // STEP 2: Scan ALL frames for ad content (app name, subtitle)
+    console.log(`  📦 Scanning ${frames.length} frames for app name/headline...`);
 
     for (const frame of frames) {
         try {
             const visualData = await extractVisibleTextData(frame);
             if (visualData.textBlocks.length < 2) continue;
 
-            // Look for store links in this frame
+            // Look for store links in this frame (backup if package search failed)
             const storeLinks = visualData.links.filter(link => {
                 const href = (link.href || '').toLowerCase();
                 const text = (link.text || '').toLowerCase();
