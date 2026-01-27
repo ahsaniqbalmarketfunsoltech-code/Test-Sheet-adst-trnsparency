@@ -446,75 +446,8 @@ async function extractFromVisibleContent(page) {
         return null;
     };
 
-    // STEP 0: Collect ALL package names from HTML (will filter later using app name)
-    console.log(`  🔍 Collecting package names from HTML...`);
-    let allFoundPackages = [];
-    try {
-        allFoundPackages = await page.evaluate(() => {
-            const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
-            const foundPackages = new Set();
-
-            // Search all href attributes
-            const allLinks = document.querySelectorAll('a[href]');
-            for (const link of allLinks) {
-                const href = link.href || '';
-                const idMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
-                if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
-                    foundPackages.add(idMatch[1]);
-                }
-                const matches = href.match(packageRegex);
-                if (matches) matches.forEach(m => foundPackages.add(m));
-            }
-
-            // Search all attributes
-            const allElements = document.querySelectorAll('*');
-            for (const el of allElements) {
-                for (const attr of el.attributes || []) {
-                    const val = attr.value || '';
-                    const matches = val.match(packageRegex);
-                    if (matches) matches.forEach(m => foundPackages.add(m));
-                }
-            }
-
-            // Search entire HTML
-            const html = document.documentElement.innerHTML || '';
-            const htmlMatches = html.match(packageRegex);
-            if (htmlMatches) htmlMatches.forEach(m => foundPackages.add(m));
-
-            // Filter out obvious system packages
-            const blacklist = ['com.google.', 'com.android.', 'com.facebook.', 'com.crashlytics.', 'androidx.'];
-            return [...foundPackages].filter(pkg =>
-                pkg.length >= 8 &&
-                pkg.split('.').length >= 3 &&
-                !blacklist.some(b => pkg.startsWith(b)) &&
-                !pkg.includes('sdk') && !pkg.includes('lib')
-            );
-        });
-        console.log(`  📦 Found ${allFoundPackages.length} candidate packages`);
-    } catch (e) { console.log(`  ⚠️ Package search failed: ${e.message}`); }
-
-    // Also collect from iframes
+    // Package extraction now happens in STEP 2 (same frame as app name)
     const frames = page.frames();
-    for (const frame of frames) {
-        try {
-            const iframePackages = await frame.evaluate(() => {
-                const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
-                const html = document.documentElement.innerHTML || '';
-                const matches = html.match(packageRegex) || [];
-                const blacklist = ['com.google.', 'com.android.', 'com.facebook.'];
-                return matches.filter(m =>
-                    m.length >= 8 &&
-                    m.split('.').length >= 3 &&
-                    !blacklist.some(b => m.startsWith(b))
-                );
-            });
-            allFoundPackages.push(...iframePackages);
-        } catch (e) { /* frame not accessible */ }
-    }
-    allFoundPackages = [...new Set(allFoundPackages)]; // Remove duplicates
-    console.log(`  📦 Total unique packages: ${allFoundPackages.length}`);
-
-    // NOTE: We will pick the best package AFTER we get the app name (see below)
 
     // STEP 1: Get advertiser name from MAIN page
     // The advertiser name is usually a company name like "ROUNDS AI LTD" below "Ad details"
@@ -538,7 +471,7 @@ async function extractFromVisibleContent(page) {
         }
     } catch (e) { console.log(`  ⚠️ Main page scan failed: ${e.message}`); }
 
-    // STEP 2: Scan ALL frames for ad content (app name, subtitle)
+    // STEP 2: Scan frames for ad content (app name, subtitle, AND package from SAME frame)
     console.log(`  📦 Scanning ${frames.length} frames for app name/headline...`);
 
     for (const frame of frames) {
@@ -546,7 +479,7 @@ async function extractFromVisibleContent(page) {
             const visualData = await extractVisibleTextData(frame);
             if (visualData.textBlocks.length < 2) continue;
 
-            // Look for store links in this frame (backup if package search failed)
+            // Look for store links in this frame
             const storeLinks = visualData.links.filter(link => {
                 const href = (link.href || '').toLowerCase();
                 const text = (link.text || '').toLowerCase();
@@ -562,12 +495,12 @@ async function extractFromVisibleContent(page) {
                     console.log(`  ✓ Store link (frame): ${cleaned.substring(0, 50)}...`);
                 }
 
-                // Find app name near this button (look for text with | pattern first)
+                // Find app name near this button
                 const nearby = visualData.textBlocks.filter(b =>
                     Math.abs(b.position.top - link.position.top) < 200 &&
                     !b.isLink && b.text !== result.advertiserName &&
                     b.text.length >= 3 && b.text.length <= 150
-                ).sort((a, b) => a.position.top - b.position.top); // Sort by vertical position
+                ).sort((a, b) => a.position.top - b.position.top);
 
                 let appNameBlock = null;
 
@@ -576,7 +509,6 @@ async function extractFromVisibleContent(page) {
                     if (lower === 'install' || lower === 'open' || lower === 'get' || lower === 'google play') continue;
 
                     if (result.appName === 'NOT_FOUND') {
-                        // If text contains |, take the WHOLE thing as app name (it's the display format)
                         if (b.text.includes('|')) {
                             result.appName = b.text;
                             appNameBlock = b;
@@ -589,13 +521,13 @@ async function extractFromVisibleContent(page) {
                     }
                 }
 
-                // Find headline: text BELOW the app name (not from | split!)
+                // Find headline below app name
                 if (appNameBlock && result.appSubtitle === 'NOT_FOUND') {
                     const belowBlocks = nearby.filter(b =>
                         b.position.top > appNameBlock.position.top &&
                         b.position.top < appNameBlock.position.top + 100 &&
                         b.text !== result.appName &&
-                        !b.text.includes('|') // Exclude the app name line
+                        !b.text.includes('|')
                     );
 
                     for (const b of belowBlocks) {
@@ -610,7 +542,7 @@ async function extractFromVisibleContent(page) {
                 }
             }
 
-            // Pattern matching: "App Name | Something" - take whole line as app name
+            // Pattern matching: "App Name | Something"
             if (result.appName === 'NOT_FOUND') {
                 for (const block of visualData.textBlocks) {
                     if (block.text.includes('|')) {
@@ -618,7 +550,7 @@ async function extractFromVisibleContent(page) {
                             result.appName = block.text;
                             console.log(`  ✓ App name (pattern): ${block.text}`);
 
-                            // Find headline: text BELOW this block
+                            // Find headline below
                             const belowBlocks = visualData.textBlocks.filter(b =>
                                 b.position.top > block.position.top &&
                                 b.position.top < block.position.top + 100 &&
@@ -641,64 +573,73 @@ async function extractFromVisibleContent(page) {
                 }
             }
 
-            // If we found app name, stop scanning frames (continue to get subtitle if needed)
+            // *** IMPORTANT: If we found app name in THIS frame, extract package from THIS FRAME ONLY ***
+            if (result.appName !== 'NOT_FOUND' && result.storeLink === 'NOT_FOUND') {
+                console.log(`  🔍 Searching for package in SAME frame as app name...`);
+                try {
+                    const framePackage = await frame.evaluate(() => {
+                        const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
+                        const html = document.documentElement.innerHTML || '';
+                        const matches = html.match(packageRegex) || [];
+
+                        // Filter out Google/SDK packages
+                        const blacklist = ['com.google.', 'com.android.', 'com.facebook.', 'androidx.'];
+                        const valid = matches.filter(m =>
+                            m.length >= 10 &&
+                            m.split('.').length >= 3 &&
+                            !blacklist.some(b => m.startsWith(b)) &&
+                            !m.includes('sdk') && !m.includes('lib')
+                        );
+
+                        // Return unique packages from THIS frame only
+                        return [...new Set(valid)];
+                    });
+
+                    if (framePackage.length > 0) {
+                        console.log(`  📦 Found ${framePackage.length} packages in ad frame: ${framePackage.slice(0, 3).join(', ')}...`);
+
+                        // If only one package in this frame, use it!
+                        if (framePackage.length === 1) {
+                            result.storeLink = buildPlayStoreUrl(framePackage[0]);
+                            console.log(`  ✓ Package (only one in frame): ${framePackage[0]}`);
+                        } else {
+                            // Multiple packages, try to match with app name
+                            const appText = result.appName.toLowerCase().replace(/[^a-z0-9]/g, '');
+                            let bestPkg = null;
+                            let bestScore = 0;
+
+                            for (const pkg of framePackage) {
+                                const pkgText = pkg.toLowerCase().replace(/[^a-z]/g, '');
+                                let score = 0;
+
+                                // Check for word matches
+                                const appWords = result.appName.toLowerCase().split(/[^a-z]+/).filter(w => w.length >= 3);
+                                for (const word of appWords) {
+                                    if (pkgText.includes(word)) score += word.length * 2;
+                                }
+
+                                if (score > bestScore) {
+                                    bestScore = score;
+                                    bestPkg = pkg;
+                                }
+                            }
+
+                            if (bestPkg && bestScore > 0) {
+                                result.storeLink = buildPlayStoreUrl(bestPkg);
+                                console.log(`  ✓ Package (best match): ${bestPkg} (score: ${bestScore})`);
+                            } else {
+                                // Use first package as fallback
+                                result.storeLink = buildPlayStoreUrl(framePackage[0]);
+                                console.log(`  ✓ Package (first in frame): ${framePackage[0]}`);
+                            }
+                        }
+                    }
+                } catch (e) { console.log(`  ⚠️ Frame package search failed: ${e.message}`); }
+            }
+
+            // If we found app name, stop scanning frames
             if (result.appName !== 'NOT_FOUND') break;
         } catch (e) { /* frame not accessible */ }
-    }
-
-    // STEP 3: Find the BEST matching package by comparing with app name/headline
-    if (result.storeLink === 'NOT_FOUND' && allFoundPackages.length > 0 && result.appName !== 'NOT_FOUND') {
-        console.log(`  🎯 Matching ${allFoundPackages.length} packages against app name...`);
-
-        // Extract keywords from app name and headline
-        const appText = `${result.appName} ${result.appSubtitle}`.toLowerCase();
-        const keywords = appText
-            .replace(/[^a-z0-9\s]/g, ' ')  // Remove special chars
-            .split(/\s+/)
-            .filter(w => w.length >= 3)     // Minimum 3 char words
-            .filter(w => !['the', 'and', 'for', 'app', 'get', 'now', 'new', 'best', 'free'].includes(w));
-
-        console.log(`  📝 Keywords from app name: ${keywords.slice(0, 10).join(', ')}`);
-
-        // Score each package
-        let bestPackage = null;
-        let bestScore = 0;
-
-        for (const pkg of allFoundPackages) {
-            const pkgLower = pkg.toLowerCase();
-            let score = 0;
-
-            // Check how many keywords are in the package name
-            for (const keyword of keywords) {
-                if (pkgLower.includes(keyword)) {
-                    score += keyword.length; // Longer matches = higher score
-                }
-            }
-
-            // Bonus for starting with 'com.'
-            if (pkg.startsWith('com.')) score += 2;
-
-            // Log packages with scores
-            if (score > 0) {
-                console.log(`    📦 ${pkg} => score: ${score}`);
-            }
-
-            if (score > bestScore) {
-                bestScore = score;
-                bestPackage = pkg;
-            }
-        }
-
-        if (bestPackage && bestScore > 0) {
-            result.storeLink = buildPlayStoreUrl(bestPackage);
-            console.log(`  ✓ Best matching package: ${bestPackage} (score: ${bestScore})`);
-        } else if (allFoundPackages.length === 1) {
-            // If only one package found, use it
-            result.storeLink = buildPlayStoreUrl(allFoundPackages[0]);
-            console.log(`  ✓ Only package found: ${allFoundPackages[0]}`);
-        } else {
-            console.log(`  ⚠️ No package matched keywords, ${allFoundPackages.length} candidates available`);
-        }
     }
 
     return result;
