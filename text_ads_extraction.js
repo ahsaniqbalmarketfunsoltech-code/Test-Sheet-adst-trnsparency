@@ -477,36 +477,79 @@ async function extractFromVisibleContent(page) {
                     console.log(`  ✓ Store link (frame): ${cleaned.substring(0, 50)}...`);
                 }
 
-                // Find app name near this button
+                // Find app name near this button (look for text with | pattern first)
                 const nearby = visualData.textBlocks.filter(b =>
                     Math.abs(b.position.top - link.position.top) < 200 &&
                     !b.isLink && b.text !== result.advertiserName &&
-                    b.text.length >= 3 && b.text.length <= 100
-                );
+                    b.text.length >= 3 && b.text.length <= 150
+                ).sort((a, b) => a.position.top - b.position.top); // Sort by vertical position
+
+                let appNameBlock = null;
 
                 for (const b of nearby) {
                     const lower = b.text.toLowerCase();
-                    if (lower === 'install' || lower === 'open' || lower === 'get') continue;
+                    if (lower === 'install' || lower === 'open' || lower === 'get' || lower === 'google play') continue;
 
-                    if (result.appName === 'NOT_FOUND' && (b.fontSize >= 14 || b.isBold)) {
-                        result.appName = b.text;
-                        console.log(`  ✓ App name (frame): ${b.text}`);
-                    } else if (result.appSubtitle === 'NOT_FOUND' && b.text !== result.appName) {
-                        result.appSubtitle = b.text;
-                        console.log(`  ✓ Subtitle (frame): ${b.text}`);
+                    if (result.appName === 'NOT_FOUND') {
+                        // If text contains |, take the WHOLE thing as app name (it's the display format)
+                        if (b.text.includes('|')) {
+                            result.appName = b.text;
+                            appNameBlock = b;
+                            console.log(`  ✓ App name (frame): ${b.text}`);
+                        } else if (b.fontSize >= 14 || b.isBold) {
+                            result.appName = b.text;
+                            appNameBlock = b;
+                            console.log(`  ✓ App name (frame): ${b.text}`);
+                        }
+                    }
+                }
+
+                // Find headline: text BELOW the app name (not from | split!)
+                if (appNameBlock && result.appSubtitle === 'NOT_FOUND') {
+                    const belowBlocks = nearby.filter(b =>
+                        b.position.top > appNameBlock.position.top &&
+                        b.position.top < appNameBlock.position.top + 100 &&
+                        b.text !== result.appName &&
+                        !b.text.includes('|') // Exclude the app name line
+                    );
+
+                    for (const b of belowBlocks) {
+                        const lower = b.text.toLowerCase();
+                        if (lower === 'install' || lower === 'open' || lower === 'get' || lower === 'google play') continue;
+                        if (b.text.length >= 5 && b.text.length <= 200) {
+                            result.appSubtitle = b.text;
+                            console.log(`  ✓ Headline (below app name): ${b.text}`);
+                            break;
+                        }
                     }
                 }
             }
 
-            // Pattern matching: "App Name | Subtitle"
+            // Pattern matching: "App Name | Something" - take whole line as app name
             if (result.appName === 'NOT_FOUND') {
                 for (const block of visualData.textBlocks) {
                     if (block.text.includes('|')) {
-                        const parts = block.text.split('|').map(p => p.trim());
-                        if (parts[0].length >= 3 && parts[0].length <= 100 && parts[0] !== result.advertiserName) {
-                            result.appName = parts[0];
-                            if (parts[1] && parts[1].length >= 3) result.appSubtitle = parts[1];
-                            console.log(`  ✓ App name (pattern): ${parts[0]}`);
+                        if (block.text.length >= 3 && block.text.length <= 150 && block.text !== result.advertiserName) {
+                            result.appName = block.text;
+                            console.log(`  ✓ App name (pattern): ${block.text}`);
+
+                            // Find headline: text BELOW this block
+                            const belowBlocks = visualData.textBlocks.filter(b =>
+                                b.position.top > block.position.top &&
+                                b.position.top < block.position.top + 100 &&
+                                b.text !== result.appName &&
+                                !b.text.includes('|')
+                            );
+
+                            for (const b of belowBlocks) {
+                                const lower = b.text.toLowerCase();
+                                if (lower === 'install' || lower === 'open' || lower === 'get') continue;
+                                if (b.text.length >= 5 && b.text.length <= 200) {
+                                    result.appSubtitle = b.text;
+                                    console.log(`  ✓ Headline (below pattern): ${b.text}`);
+                                    break;
+                                }
+                            }
                             break;
                         }
                     }
