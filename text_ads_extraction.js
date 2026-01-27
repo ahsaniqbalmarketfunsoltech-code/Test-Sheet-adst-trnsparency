@@ -454,6 +454,11 @@ async function extractFromVisibleContent(page) {
         result.advertiserName = await page.evaluate(() => {
             // Helper: clean text
             const clean = t => (t || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+            const blacklist = [
+                'keyboard_arrow_down', 'keyboard_arrow_up', 'keyboard_arrow_left', 'keyboard_arrow_right',
+                'chevron_left', 'chevron_right', 'arrow_back', 'arrow_forward',
+                'close', 'open', 'menu', 'search', 'filter', 'more_vert', 'more_horiz'
+            ];
 
             // 1. Try finding by "Ad details" label
             const allElems = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, p'));
@@ -463,11 +468,14 @@ async function extractFromVisibleContent(page) {
                 const headerRect = header.getBoundingClientRect();
                 // Search for element immediately below (within 100px) and aligned
                 const candidates = allElems.filter(el => {
+                    const text = clean(el.innerText);
+                    if (text.length <= 2) return false;
+                    if (blacklist.some(b => text.toLowerCase().includes(b))) return false;
+
                     const r = el.getBoundingClientRect();
                     return r.top > headerRect.top + 5 &&
                         r.top < headerRect.top + 150 &&
                         Math.abs(r.left - headerRect.left) < 50 &&
-                        clean(el.innerText).length > 2 &&
                         el !== header &&
                         !el.contains(header); // Not a parent
                 });
@@ -486,7 +494,10 @@ async function extractFromVisibleContent(page) {
                 return r.top < 300 && clean(el.innerText).length > 3 && r.height > 10;
             });
 
-            const skip = ['transparency', 'google', 'ad details', 'home', 'faq', 'sign in', 'menu', 'search', 'filter'];
+            const skip = [
+                'transparency', 'google', 'ad details', 'home', 'faq', 'sign in', 'menu', 'search', 'filter',
+                'keyboard_arrow', 'chevron', 'arrow_back', 'arrow_forward', 'close', 'open'
+            ];
             const valid = topTexts.filter(el => {
                 const t = clean(el.innerText).toLowerCase();
                 return !skip.some(s => t.includes(s));
