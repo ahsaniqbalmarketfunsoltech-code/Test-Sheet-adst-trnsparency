@@ -1,9 +1,8 @@
-name: Text Ads Extraction Agent (Top to Bottom)
+name: Text Ads Extraction (Top to Bottom)
 
 on:
   schedule:
-    - cron: '0 0,6,12,18 * * *' # Run 4 times per day
-  # Manual trigger
+    - cron: '0 0,6,12,18 * * *'
   workflow_dispatch:
     inputs:
       sheet_name:
@@ -18,6 +17,7 @@ jobs:
     timeout-minutes: 360  # 6 hours max runtime
     permissions:
       contents: read
+      actions: write
     
     steps:
       - name: Checkout repository
@@ -42,7 +42,7 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       
-      - name: Run Text Ads Extraction Agent (Top to Bottom)
+      - name: Run Agent (Top to Bottom)
         env:
           SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Text Ads data' }}
           SHEET_BATCH_SIZE: ${{ secrets.SHEET_BATCH_SIZE || '10000' }}
@@ -53,7 +53,23 @@ jobs:
           PAGE_LOAD_DELAY_MAX: ${{ secrets.PAGE_LOAD_DELAY_MAX || '3000' }}
           PROXIES: ${{ secrets.PROXIES }}
           PUPPETEER_EXECUTABLE_PATH: ${{ secrets.PUPPETEER_EXECUTABLE_PATH }}
-        run: node text_ads_extraction_top_to_bottom.js
+        run: |
+          # PIPE output to file and stdout so we can check it later
+          node text_ads_extraction_top_to_bottom.js 2>&1 | tee agent.log
+      
+      - name: Trigger next run (Auto-Loop)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHEET_INPUT: ${{ inputs.sheet_name || 'Text Ads data' }}
+        run: |
+          # Check logs to see if we finished everything
+          if grep -q "All rows complete. Nothing to process" agent.log; then
+            echo "✅ Processing complete. No more data."
+          else
+            echo "🔄 More data remains (or time limit reached). Triggering next run..."
+            gh workflow run text-ads-top-to-bottom.yml --ref ${{ github.ref }} -f sheet_name="$SHEET_INPUT"
+          fi
       
       - name: Cleanup credentials
         if: always()
@@ -66,5 +82,6 @@ jobs:
           name: error-logs
           path: |
             *.log
+            agent.log
             npm-debug.log*
           retention-days: 7
