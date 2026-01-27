@@ -454,14 +454,20 @@ async function extractFromVisibleContent(page) {
     try {
         const mainData = await extractVisibleTextData(page);
         // Skip UI text and look for actual company names
-        const skipTexts = ['transparency', 'google ads', 'ad details', 'home', 'faqs', 'center', 'centre'];
+        const skipTexts = [
+            'transparency', 'google ads', 'ad details', 'home', 'faqs', 'center', 'centre',
+            'close', 'open', 'menu', 'back', 'forward', 'about', 'options', 'feedback', 'why this ad'
+        ];
 
         for (const block of mainData.largeText.filter(b => b.position.top < 400)) {
             const lower = block.text.toLowerCase();
             // Skip Google UI elements
             if (skipTexts.some(s => lower.includes(s))) continue;
-            // Skip single words that are likely navigation
+
+            // Skip single words/short text that are likely navigation/buttons
             if (block.text.split(' ').length === 1 && block.text.length < 5) continue;
+            // specific check for "close"
+            if (lower === 'close') continue;
 
             if (block.text.length >= 3 && block.text.length <= 100) {
                 result.advertiserName = block.text;
@@ -509,6 +515,9 @@ async function extractFromVisibleContent(page) {
                     if (lower === 'install' || lower === 'open' || lower === 'get' || lower === 'google play') continue;
 
                     if (result.appName === 'NOT_FOUND') {
+                        // Blacklist invalid app names
+                        if (lower.includes('advertiser details') || lower.includes('about this ad')) continue;
+
                         if (b.text.includes('|')) {
                             result.appName = b.text;
                             appNameBlock = b;
