@@ -324,8 +324,8 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
  * Extract all visible text from the page in reading order
  * This gets EXACTLY what a user would see on the screen
  */
-async function extractVisibleTextData(page) {
-    return await page.evaluate(() => {
+async function extractVisibleTextData(target) {
+    return await target.evaluate(() => {
         const results = {
             allText: '',
             textBlocks: [],
@@ -334,40 +334,45 @@ async function extractVisibleTextData(page) {
             mediumText: []
         };
 
-        // Check if element is actually visible to user
+        // Blacklist Google UI elements
+        const blacklistTexts = [
+            'sign in', 'faqs', 'all topics', 'keyboard_arrow_right', 'keyboard_arrow_left',
+            'ad details', 'google ads transparency', 'transparency center', 'about this ad',
+            'home', 'see more ads', 'report this ad', 'shown anywhere', 'arrow_right',
+            'arrow_left', 'navigate_next', 'navigate_before', 'more_vert', 'menu',
+            'the information about this ad'
+        ];
+
         function isVisible(element) {
             if (!element) return false;
             const style = window.getComputedStyle(element);
             const rect = element.getBoundingClientRect();
-
             return (
                 style.display !== 'none' &&
                 style.visibility !== 'hidden' &&
                 style.opacity !== '0' &&
                 rect.width > 0 &&
-                rect.height > 0 &&
-                rect.top < window.innerHeight * 2 && // Include slightly off-screen
-                rect.bottom > -100
+                rect.height > 0
             );
         }
 
-        // Get all visible text elements
         const allElements = document.querySelectorAll('*');
-        const processedTexts = new Set(); // Avoid duplicates
+        const processedTexts = new Set();
 
         for (const element of allElements) {
             if (!isVisible(element)) continue;
 
-            // Get direct text (not from children)
             let text = '';
             for (const node of element.childNodes) {
-                if (node.nodeType === Node.TEXT_NODE) {
-                    text += node.textContent;
-                }
+                if (node.nodeType === Node.TEXT_NODE) text += node.textContent;
             }
             text = text.trim();
 
             if (!text || text.length < 2) continue;
+
+            // Filter out blacklisted UI text
+            const lowerText = text.toLowerCase();
+            if (blacklistTexts.some(b => lowerText === b || lowerText.includes(b))) continue;
             if (processedTexts.has(text)) continue;
             processedTexts.add(text);
 
@@ -378,44 +383,25 @@ async function extractVisibleTextData(page) {
 
             const block = {
                 text: text,
-                tag: element.tagName.toLowerCase(),
                 fontSize: fontSize,
                 fontWeight: fontWeight,
                 isBold: fontWeight >= 600,
-                position: {
-                    top: rect.top,
-                    left: rect.left,
-                    width: rect.width,
-                    height: rect.height
-                },
+                position: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
                 isLink: element.tagName === 'A',
                 href: element.tagName === 'A' ? element.href : null
             };
 
             results.textBlocks.push(block);
+            if (fontSize >= 16) results.largeText.push(block);
+            else if (fontSize >= 13) results.mediumText.push(block);
 
-            // Categorize by size
-            if (fontSize >= 18) {
-                results.largeText.push(block);
-            } else if (fontSize >= 14) {
-                results.mediumText.push(block);
-            }
-
-            // Collect links
             if (element.tagName === 'A' && element.href) {
-                results.links.push({
-                    text: text,
-                    href: element.href,
-                    position: block.position
-                });
+                results.links.push({ text: text, href: element.href, position: block.position });
             }
         }
 
-        // Sort by reading order (top to bottom, left to right)
         results.textBlocks.sort((a, b) => {
-            if (Math.abs(a.position.top - b.position.top) > 20) {
-                return a.position.top - b.position.top;
-            }
+            if (Math.abs(a.position.top - b.position.top) > 20) return a.position.top - b.position.top;
             return a.position.left - b.position.left;
         });
 
@@ -425,13 +411,11 @@ async function extractVisibleTextData(page) {
 }
 
 /**
- * Extract app data using VISUAL PATTERNS
- * Works like a human reading the page
+ * Extract app data using VISUAL PATTERNS across ALL frames
  */
 async function extractFromVisibleContent(page) {
-    console.log(`  👁️ Extracting from visible content (frontend)...`);
+    console.log(`  👁️ Scanning frontend content (main + iframes)...`);
 
-    const visualData = await extractVisibleTextData(page);
     const result = {
         advertiserName: 'NOT_FOUND',
         appName: 'NOT_FOUND',
@@ -442,193 +426,96 @@ async function extractFromVisibleContent(page) {
     // Helper: Clean store link
     const cleanStoreLink = (href) => {
         if (!href || typeof href !== 'string') return null;
-
-        // Direct Play Store
         if (href.includes('play.google.com/store/apps') && href.includes('id=')) {
             const match = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
             return match ? match[1] : href.split('&')[0];
         }
-
-        // Direct App Store
         if ((href.includes('apps.apple.com') || href.includes('itunes.apple.com')) && href.includes('/app/')) {
-            const match = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^&\s"']+\/app\/[^&\s"']+)/);
-            return match ? match[1] : href.split('&')[0];
+            return href.split('&')[0];
         }
-
-        // Extract from redirects
-        if (href.includes('googleadservices.com') || href.includes('/pagead/')) {
-            const patterns = [/[?&]adurl=([^&\s]+)/i, /[?&]dest=([^&\s]+)/i, /[?&]url=([^&\s]+)/i];
-            for (const pattern of patterns) {
-                const match = href.match(pattern);
-                if (match && match[1]) {
-                    try {
-                        const decoded = decodeURIComponent(match[1]);
-                        const cleaned = cleanStoreLink(decoded);
-                        if (cleaned) return cleaned;
-                    } catch (e) { }
-                }
-            }
-        }
-
-        // Extract package name
         const pkgMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
         if (pkgMatch && pkgMatch[1] && pkgMatch[1].includes('.')) {
             return `https://play.google.com/store/apps/details?id=${pkgMatch[1]}`;
         }
-
         return null;
     };
 
-    // STEP 1: Find advertiser name (large text at top)
-    const topLargeText = visualData.largeText.filter(b => b.position.top < 300);
-    for (const block of topLargeText) {
-        const text = block.text.trim();
-        const lower = text.toLowerCase();
-
-        // Skip page titles
-        if (lower.includes('ad details') || lower.includes('google ads') ||
-            lower.includes('transparency') || lower.includes('about this ad')) {
-            continue;
-        }
-
-        if (text.length >= 3 && text.length <= 100) {
-            result.advertiserName = text;
-            console.log(`  ✓ Advertiser (visual): ${text}`);
-            break;
-        }
-    }
-
-    // STEP 2: Find store links from visible links
-    const storeLinks = visualData.links.filter(link => {
-        const href = link.href.toLowerCase();
-        return href.includes('play.google.com') || href.includes('apps.apple.com') ||
-            href.includes('itunes.apple.com') || link.text.toLowerCase().includes('install');
-    });
-
-    if (storeLinks.length > 0) {
-        const link = storeLinks[0];
-        const cleaned = cleanStoreLink(link.href);
-        if (cleaned) {
-            result.storeLink = cleaned;
-            console.log(`  ✓ Store link (visual): ${cleaned.substring(0, 60)}...`);
-        }
-
-        // STEP 3: Find app name near install button
-        const installPos = link.position;
-        const nearbyText = visualData.textBlocks.filter(block => {
-            const vDist = Math.abs(block.position.top - installPos.top);
-            const hDist = Math.abs(block.position.left - installPos.left);
-            return vDist < 250 && hDist < 500 && block.fontSize >= 13;
-        });
-
-        for (const block of nearbyText) {
-            const text = block.text.trim();
-            const lower = text.toLowerCase();
-
-            // Skip button text
-            if (lower === 'install' || lower === 'open' || lower === 'get' ||
-                lower === 'download' || lower === 'play now') {
-                continue;
-            }
-
-            // Skip advertiser name
-            if (text === result.advertiserName) continue;
-
-            // App name: 3-100 chars, medium-large text
-            if (text.length >= 3 && text.length <= 100) {
-                if (result.appName === 'NOT_FOUND' && (block.fontSize >= 14 || block.isBold)) {
-                    result.appName = text;
-                    console.log(`  ✓ App name (visual): ${text}`);
-                } else if (result.appSubtitle === 'NOT_FOUND' && text !== result.appName && text.length >= 5) {
-                    result.appSubtitle = text;
-                    console.log(`  ✓ Subtitle (visual): ${text}`);
-                }
-            }
-        }
-    }
-
-    // STEP 4: Pattern matching on all visible text
-    if (result.appName === 'NOT_FOUND') {
-        const lines = visualData.allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-        for (const line of lines) {
-            const lower = line.toLowerCase();
-
-            // Skip known non-app text
-            if (lower.includes('ad details') || lower.includes('google ads') ||
-                lower.includes('transparency') || lower.includes('last shown') ||
-                lower.includes('format:') || lower.includes('see more ads')) {
-                continue;
-            }
-
-            // Pattern: "App Name | Subtitle" or "App Name - Subtitle"
-            if (line.includes('|')) {
-                const parts = line.split('|').map(p => p.trim());
-                if (parts[0].length >= 3 && parts[0].length <= 100 && parts[0] !== result.advertiserName) {
-                    result.appName = parts[0];
-                    if (parts[1] && parts[1].length >= 3 && parts[1].length <= 200) {
-                        result.appSubtitle = parts[1];
-                    }
-                    console.log(`  ✓ App name from pattern (visual): ${parts[0]}`);
-                    break;
-                }
-            }
-
-            // Pattern: "App Name - Subtitle"
-            if (line.includes(' - ') && !line.includes('http')) {
-                const parts = line.split(' - ').map(p => p.trim());
-                if (parts[0].length >= 3 && parts[0].length <= 100 && parts[0] !== result.advertiserName) {
-                    result.appName = parts[0];
-                    if (parts[1] && parts[1].length >= 3 && parts[1].length <= 200) {
-                        result.appSubtitle = parts[1];
-                    }
-                    console.log(`  ✓ App name from pattern (visual): ${parts[0]}`);
-                    break;
-                }
-            }
-        }
-    }
-
-    // STEP 5: Find subtitle below app name
-    if (result.appSubtitle === 'NOT_FOUND' && result.appName !== 'NOT_FOUND') {
-        const appNameBlock = visualData.textBlocks.find(b => b.text === result.appName);
-        if (appNameBlock) {
-            const belowBlocks = visualData.textBlocks.filter(block => {
-                return block.position.top > appNameBlock.position.top &&
-                    block.position.top < appNameBlock.position.top + 120 &&
-                    Math.abs(block.position.left - appNameBlock.position.left) < 100;
-            });
-
-            for (const block of belowBlocks) {
-                const text = block.text.trim();
-                const lower = text.toLowerCase();
-
-                if (text.length >= 5 && text.length <= 200 &&
-                    text !== result.appName && text !== result.advertiserName &&
-                    lower !== 'install' && lower !== 'open' && lower !== 'get') {
-                    result.appSubtitle = text;
-                    console.log(`  ✓ Subtitle below app name (visual): ${text}`);
-                    break;
-                }
-            }
-        }
-    }
-
-    // STEP 6: Fallback - use medium/large text
-    if (result.appName === 'NOT_FOUND') {
-        for (const block of visualData.mediumText) {
-            const text = block.text.trim();
-            const lower = text.toLowerCase();
-
-            if (text.length >= 3 && text.length <= 100 &&
-                text !== result.advertiserName &&
-                !lower.includes('ad details') && !lower.includes('google ads') &&
-                lower !== 'install' && lower !== 'open') {
-                result.appName = text;
-                console.log(`  ✓ App name fallback (visual): ${text}`);
+    // STEP 1: Get advertiser name from MAIN page (it's always there)
+    try {
+        const mainData = await extractVisibleTextData(page);
+        for (const block of mainData.largeText.filter(b => b.position.top < 350)) {
+            if (block.text.length >= 3 && block.text.length <= 100) {
+                result.advertiserName = block.text;
+                console.log(`  ✓ Advertiser (main): ${block.text}`);
                 break;
             }
         }
+    } catch (e) { console.log(`  ⚠️ Main page scan failed: ${e.message}`); }
+
+    // STEP 2: Scan ALL frames for ad content (app name, link, subtitle)
+    const frames = page.frames();
+    console.log(`  📦 Scanning ${frames.length} frames...`);
+
+    for (const frame of frames) {
+        try {
+            const visualData = await extractVisibleTextData(frame);
+            if (visualData.textBlocks.length < 2) continue;
+
+            // Look for store links in this frame
+            const storeLinks = visualData.links.filter(link => {
+                const href = (link.href || '').toLowerCase();
+                const text = (link.text || '').toLowerCase();
+                return href.includes('play.google.com') || href.includes('apps.apple.com') ||
+                    text.includes('install') || text.includes('get');
+            });
+
+            if (storeLinks.length > 0 && result.storeLink === 'NOT_FOUND') {
+                const link = storeLinks[0];
+                const cleaned = cleanStoreLink(link.href);
+                if (cleaned) {
+                    result.storeLink = cleaned;
+                    console.log(`  ✓ Store link (frame): ${cleaned.substring(0, 50)}...`);
+                }
+
+                // Find app name near this button
+                const nearby = visualData.textBlocks.filter(b =>
+                    Math.abs(b.position.top - link.position.top) < 200 &&
+                    !b.isLink && b.text !== result.advertiserName &&
+                    b.text.length >= 3 && b.text.length <= 100
+                );
+
+                for (const b of nearby) {
+                    const lower = b.text.toLowerCase();
+                    if (lower === 'install' || lower === 'open' || lower === 'get') continue;
+
+                    if (result.appName === 'NOT_FOUND' && (b.fontSize >= 14 || b.isBold)) {
+                        result.appName = b.text;
+                        console.log(`  ✓ App name (frame): ${b.text}`);
+                    } else if (result.appSubtitle === 'NOT_FOUND' && b.text !== result.appName) {
+                        result.appSubtitle = b.text;
+                        console.log(`  ✓ Subtitle (frame): ${b.text}`);
+                    }
+                }
+            }
+
+            // Pattern matching: "App Name | Subtitle"
+            if (result.appName === 'NOT_FOUND') {
+                for (const block of visualData.textBlocks) {
+                    if (block.text.includes('|')) {
+                        const parts = block.text.split('|').map(p => p.trim());
+                        if (parts[0].length >= 3 && parts[0].length <= 100 && parts[0] !== result.advertiserName) {
+                            result.appName = parts[0];
+                            if (parts[1] && parts[1].length >= 3) result.appSubtitle = parts[1];
+                            console.log(`  ✓ App name (pattern): ${parts[0]}`);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // If we found app data, stop scanning frames
+            if (result.appName !== 'NOT_FOUND' && result.storeLink !== 'NOT_FOUND') break;
+        } catch (e) { /* frame not accessible */ }
     }
 
     return result;
