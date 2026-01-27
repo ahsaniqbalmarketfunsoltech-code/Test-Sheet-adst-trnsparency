@@ -446,10 +446,11 @@ async function extractFromVisibleContent(page) {
         return null;
     };
 
-    // STEP 0: Search ENTIRE PAGE HTML for package names (com.xxx.xxx pattern)
-    console.log(`  🔍 Searching HTML for package names...`);
+    // STEP 0: Collect ALL package names from HTML (will filter later using app name)
+    console.log(`  🔍 Collecting package names from HTML...`);
+    let allFoundPackages = [];
     try {
-        const packageName = await page.evaluate(() => {
+        allFoundPackages = await page.evaluate(() => {
             const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
             const foundPackages = new Set();
 
@@ -457,36 +458,22 @@ async function extractFromVisibleContent(page) {
             const allLinks = document.querySelectorAll('a[href]');
             for (const link of allLinks) {
                 const href = link.href || '';
-                // Direct id= parameter
                 const idMatch = href.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
                 if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
                     foundPackages.add(idMatch[1]);
                 }
-                // Package pattern in URL
                 const matches = href.match(packageRegex);
                 if (matches) matches.forEach(m => foundPackages.add(m));
             }
 
-            // Search all data-* attributes
+            // Search all attributes
             const allElements = document.querySelectorAll('*');
             for (const el of allElements) {
                 for (const attr of el.attributes || []) {
                     const val = attr.value || '';
                     const matches = val.match(packageRegex);
                     if (matches) matches.forEach(m => foundPackages.add(m));
-                    const idMatch = val.match(/[?&]id=([a-zA-Z][a-zA-Z0-9_.]+)/);
-                    if (idMatch && idMatch[1] && idMatch[1].includes('.')) {
-                        foundPackages.add(idMatch[1]);
-                    }
                 }
-            }
-
-            // Search script tags
-            const scripts = document.querySelectorAll('script');
-            for (const script of scripts) {
-                const content = script.textContent || '';
-                const matches = content.match(packageRegex);
-                if (matches) matches.forEach(m => foundPackages.add(m));
             }
 
             // Search entire HTML
@@ -494,67 +481,40 @@ async function extractFromVisibleContent(page) {
             const htmlMatches = html.match(packageRegex);
             if (htmlMatches) htmlMatches.forEach(m => foundPackages.add(m));
 
-            // Filter out common false positives (Google system packages, SDKs, etc.)
-            const blacklistPatterns = [
-                'com.google.android', 'com.android.', 'com.google.ads', 'com.google.gms',
-                'com.google.firebase', 'com.google.mlkit', 'com.google.play.core',
-                'com.facebook.', 'com.crashlytics.', 'schema.org', 'w3.org',
-                'com.google.', 'android.support.', 'androidx.'
-            ];
-            const validPackages = [...foundPackages].filter(pkg => {
-                if (pkg.length < 8 || pkg.length > 100) return false;
-                if (blacklistPatterns.some(bp => pkg.startsWith(bp) || pkg.includes(bp))) return false;
-                if (pkg.split('.').length < 3) return false;
-                // Must look like a real app package (not SDK)
-                if (pkg.includes('sdk') || pkg.includes('lib') || pkg.includes('core')) return false;
-                return true;
-            });
-
-            // Prefer packages starting with 'com.'
-            const comPackages = validPackages.filter(p => p.startsWith('com.'));
-            return comPackages[0] || validPackages[0] || null;
+            // Filter out obvious system packages
+            const blacklist = ['com.google.', 'com.android.', 'com.facebook.', 'com.crashlytics.', 'androidx.'];
+            return [...foundPackages].filter(pkg =>
+                pkg.length >= 8 &&
+                pkg.split('.').length >= 3 &&
+                !blacklist.some(b => pkg.startsWith(b)) &&
+                !pkg.includes('sdk') && !pkg.includes('lib')
+            );
         });
-
-        if (packageName) {
-            result.storeLink = buildPlayStoreUrl(packageName);
-            console.log(`  ✓ Package found in HTML: ${packageName}`);
-            console.log(`  ✓ Store link: ${result.storeLink}`);
-        }
+        console.log(`  📦 Found ${allFoundPackages.length} candidate packages`);
     } catch (e) { console.log(`  ⚠️ Package search failed: ${e.message}`); }
 
-    // Also search iframes for package names
+    // Also collect from iframes
     const frames = page.frames();
-    if (result.storeLink === 'NOT_FOUND') {
-        for (const frame of frames) {
-            try {
-                const packageName = await frame.evaluate(() => {
-                    const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
-                    const html = document.documentElement.innerHTML || '';
-                    const matches = html.match(packageRegex);
-                    if (!matches) return null;
-
-                    const blacklist = [
-                        'com.google.android', 'com.android.', 'com.google.ads', 'com.google.gms',
-                        'com.google.firebase', 'com.google.mlkit', 'com.google.play',
-                        'com.facebook.', 'com.crashlytics.', 'com.google.'
-                    ];
-                    const valid = matches.filter(m =>
-                        m.split('.').length >= 3 &&
-                        m.length >= 8 &&
-                        !blacklist.some(b => m.startsWith(b) || m.includes(b)) &&
-                        !m.includes('sdk') && !m.includes('lib') && !m.includes('core')
-                    );
-                    return valid[0] || null;
-                });
-
-                if (packageName) {
-                    result.storeLink = buildPlayStoreUrl(packageName);
-                    console.log(`  ✓ Package found in iframe: ${packageName}`);
-                    break;
-                }
-            } catch (e) { /* frame not accessible */ }
-        }
+    for (const frame of frames) {
+        try {
+            const iframePackages = await frame.evaluate(() => {
+                const packageRegex = /\b(com\.[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+)\b/g;
+                const html = document.documentElement.innerHTML || '';
+                const matches = html.match(packageRegex) || [];
+                const blacklist = ['com.google.', 'com.android.', 'com.facebook.'];
+                return matches.filter(m =>
+                    m.length >= 8 &&
+                    m.split('.').length >= 3 &&
+                    !blacklist.some(b => m.startsWith(b))
+                );
+            });
+            allFoundPackages.push(...iframePackages);
+        } catch (e) { /* frame not accessible */ }
     }
+    allFoundPackages = [...new Set(allFoundPackages)]; // Remove duplicates
+    console.log(`  📦 Total unique packages: ${allFoundPackages.length}`);
+
+    // NOTE: We will pick the best package AFTER we get the app name (see below)
 
     // STEP 1: Get advertiser name from MAIN page
     // The advertiser name is usually a company name like "ROUNDS AI LTD" below "Ad details"
@@ -681,9 +641,64 @@ async function extractFromVisibleContent(page) {
                 }
             }
 
-            // If we found app data, stop scanning frames
-            if (result.appName !== 'NOT_FOUND' && result.storeLink !== 'NOT_FOUND') break;
+            // If we found app name, stop scanning frames (continue to get subtitle if needed)
+            if (result.appName !== 'NOT_FOUND') break;
         } catch (e) { /* frame not accessible */ }
+    }
+
+    // STEP 3: Find the BEST matching package by comparing with app name/headline
+    if (result.storeLink === 'NOT_FOUND' && allFoundPackages.length > 0 && result.appName !== 'NOT_FOUND') {
+        console.log(`  🎯 Matching ${allFoundPackages.length} packages against app name...`);
+
+        // Extract keywords from app name and headline
+        const appText = `${result.appName} ${result.appSubtitle}`.toLowerCase();
+        const keywords = appText
+            .replace(/[^a-z0-9\s]/g, ' ')  // Remove special chars
+            .split(/\s+/)
+            .filter(w => w.length >= 3)     // Minimum 3 char words
+            .filter(w => !['the', 'and', 'for', 'app', 'get', 'now', 'new', 'best', 'free'].includes(w));
+
+        console.log(`  📝 Keywords from app name: ${keywords.slice(0, 10).join(', ')}`);
+
+        // Score each package
+        let bestPackage = null;
+        let bestScore = 0;
+
+        for (const pkg of allFoundPackages) {
+            const pkgLower = pkg.toLowerCase();
+            let score = 0;
+
+            // Check how many keywords are in the package name
+            for (const keyword of keywords) {
+                if (pkgLower.includes(keyword)) {
+                    score += keyword.length; // Longer matches = higher score
+                }
+            }
+
+            // Bonus for starting with 'com.'
+            if (pkg.startsWith('com.')) score += 2;
+
+            // Log packages with scores
+            if (score > 0) {
+                console.log(`    📦 ${pkg} => score: ${score}`);
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestPackage = pkg;
+            }
+        }
+
+        if (bestPackage && bestScore > 0) {
+            result.storeLink = buildPlayStoreUrl(bestPackage);
+            console.log(`  ✓ Best matching package: ${bestPackage} (score: ${bestScore})`);
+        } else if (allFoundPackages.length === 1) {
+            // If only one package found, use it
+            result.storeLink = buildPlayStoreUrl(allFoundPackages[0]);
+            console.log(`  ✓ Only package found: ${allFoundPackages[0]}`);
+        } else {
+            console.log(`  ⚠️ No package matched keywords, ${allFoundPackages.length} candidates available`);
+        }
     }
 
     return result;
