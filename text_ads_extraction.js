@@ -494,12 +494,19 @@ async function extractFromVisibleContent(page) {
             const htmlMatches = html.match(packageRegex);
             if (htmlMatches) htmlMatches.forEach(m => foundPackages.add(m));
 
-            // Filter out common false positives
-            const blacklistPatterns = ['com.google.android', 'com.android.', 'schema.org', 'w3.org', 'com.google.ads'];
+            // Filter out common false positives (Google system packages, SDKs, etc.)
+            const blacklistPatterns = [
+                'com.google.android', 'com.android.', 'com.google.ads', 'com.google.gms',
+                'com.google.firebase', 'com.google.mlkit', 'com.google.play.core',
+                'com.facebook.', 'com.crashlytics.', 'schema.org', 'w3.org',
+                'com.google.', 'android.support.', 'androidx.'
+            ];
             const validPackages = [...foundPackages].filter(pkg => {
-                if (pkg.length < 5 || pkg.length > 100) return false;
-                if (blacklistPatterns.some(bp => pkg.startsWith(bp))) return false;
+                if (pkg.length < 8 || pkg.length > 100) return false;
+                if (blacklistPatterns.some(bp => pkg.startsWith(bp) || pkg.includes(bp))) return false;
                 if (pkg.split('.').length < 3) return false;
+                // Must look like a real app package (not SDK)
+                if (pkg.includes('sdk') || pkg.includes('lib') || pkg.includes('core')) return false;
                 return true;
             });
 
@@ -526,10 +533,16 @@ async function extractFromVisibleContent(page) {
                     const matches = html.match(packageRegex);
                     if (!matches) return null;
 
-                    const blacklist = ['com.google.android', 'com.android.', 'com.google.ads'];
+                    const blacklist = [
+                        'com.google.android', 'com.android.', 'com.google.ads', 'com.google.gms',
+                        'com.google.firebase', 'com.google.mlkit', 'com.google.play',
+                        'com.facebook.', 'com.crashlytics.', 'com.google.'
+                    ];
                     const valid = matches.filter(m =>
                         m.split('.').length >= 3 &&
-                        !blacklist.some(b => m.startsWith(b))
+                        m.length >= 8 &&
+                        !blacklist.some(b => m.startsWith(b) || m.includes(b)) &&
+                        !m.includes('sdk') && !m.includes('lib') && !m.includes('core')
                     );
                     return valid[0] || null;
                 });
@@ -543,10 +556,20 @@ async function extractFromVisibleContent(page) {
         }
     }
 
-    // STEP 1: Get advertiser name from MAIN page (it's always there)
+    // STEP 1: Get advertiser name from MAIN page
+    // The advertiser name is usually a company name like "ROUNDS AI LTD" below "Ad details"
     try {
         const mainData = await extractVisibleTextData(page);
-        for (const block of mainData.largeText.filter(b => b.position.top < 350)) {
+        // Skip UI text and look for actual company names
+        const skipTexts = ['transparency', 'google ads', 'ad details', 'home', 'faqs', 'center', 'centre'];
+
+        for (const block of mainData.largeText.filter(b => b.position.top < 400)) {
+            const lower = block.text.toLowerCase();
+            // Skip Google UI elements
+            if (skipTexts.some(s => lower.includes(s))) continue;
+            // Skip single words that are likely navigation
+            if (block.text.split(' ').length === 1 && block.text.length < 5) continue;
+
             if (block.text.length >= 3 && block.text.length <= 100) {
                 result.advertiserName = block.text;
                 console.log(`  ✓ Advertiser (main): ${block.text}`);
