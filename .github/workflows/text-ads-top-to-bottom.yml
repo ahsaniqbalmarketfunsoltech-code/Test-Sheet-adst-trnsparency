@@ -1,5 +1,9 @@
 name: Text Ads Extraction (Top to Bottom)
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 on:
   schedule:
     - cron: '0 0,6,12,18 * * *'

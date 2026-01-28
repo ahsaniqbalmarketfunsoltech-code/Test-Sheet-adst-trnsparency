@@ -1,5 +1,9 @@
 name: Data Aggregator - Twice Daily
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 on:
   schedule:
     # Runs twice daily: 6 AM and 6 PM Pakistan Time (UTC+5)
