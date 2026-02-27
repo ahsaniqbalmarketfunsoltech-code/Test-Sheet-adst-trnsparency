@@ -5,8 +5,8 @@ concurrency:
   cancel-in-progress: false
 
 on:
-  schedule:
-    - cron: '0 0,6,12,18 * * *' # Run 4 times per day
+  # schedule:
+  #   - cron: '0 0,6,12,18 * * *' # Run 4 times per day
   # Manual trigger
   workflow_dispatch:
     inputs:
